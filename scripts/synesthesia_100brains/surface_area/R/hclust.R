@@ -31,7 +31,7 @@ hclust.plot <- function(data, group, cortype = c('pearson', 'partial'), clust_me
   if (clust_method == 'single'){
     clusters = cutree(clust, k = cut) # desired number of clusters if nearest neighbour
   }
-  if (clust_method == 'Ward.D'){
+  if (clust_method == 'ward.D'){
     clusters = cutree(clust, h = cut) # level to cut at if Ward's method
   }
   
@@ -39,7 +39,7 @@ hclust.plot <- function(data, group, cortype = c('pearson', 'partial'), clust_me
   return(clusters)
 } 
 
-# Perform nearest neighbour (aka single linkage) clustering on control data and retrieve pairwise clusters
+# Perform nearest neighbour (aka single linkage) clustering on full control data and retrieve pairwise clusters
 clust_nn_SA_abs = hclust.plot(SA_abs_lr, group = 'Control', cortype = 'partial', clust_method = 'single', cut = 90)
 
 # Plot cluster anatomical positions
@@ -48,7 +48,7 @@ clust_nn_SA_abs$cluster = factor(clust_nn_SA_abs$cluster) # factor clusters for 
 
 ggplot(data = clust_nn_SA_abs, aes(x = x, y = max(y) - y, fill = cluster))+ # plot parcel locations with fill colour for cluster
   geom_point(size = 1, shape = 21, stroke = 0.5)+
-  geom_text(aes(label = cluster), size = 1.5, vjust = -0.8)+
+  geom_text(aes(label = gsub(x = cluster, pattern = 'cluster ', replacement = '')), size = 1.5, vjust = -0.8)+
   scale_fill_viridis_d(option = "C")+
   labs(x = 'x', y = 'y')+
   theme(legend.position = 'none',
@@ -84,3 +84,40 @@ SA_abs_nn90_avg = average_clusters(SA_abs_lr, clust_nn_SA_abs) # average within 
 pcor(SA_abs_nn90_avg[[1]][SA_abs_nn90_avg[[1]]$Group == 'Syn', 8:ncol(SA_abs_nn90_avg[[1]])])$estimate # quick check of synesthete partial correlation
 write.csv(SA_abs_nn90_avg[[1]], file = paste0(savepath_data, 'SA_abs_nn90_avg.csv'), row.names = F) # write to .csv
 write.csv(SA_abs_nn90_avg[[2]], file = paste0(savepath_data, 'SA_abs_nn90_pos.csv'), row.names = F) # write cluster centroids to .csv
+
+# Resample the controls to match syn sample size and repeat cluster averaging
+set.seed(6475) # set seed with rn
+SA_abs_lr_resamp = rbind(SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(seq(1:650), size = 102),], # reform data with n = 102
+                         SA_abs_lr[SA_abs_lr$Group == 'Syn',])
+SA_abs_nn90_avg_102 = average_clusters(SA_abs_lr_resamp, clust_nn_SA_abs)
+write.csv(SA_abs_nn90_avg_102[[1]], file = paste0(savepath_data, 'SA_abs_nn90_avg_resamp.csv'), row.names = F) # write to .csv
+
+# Perform clustering using Ward's method
+clust_wrd_SA_abs = hclust.plot(SA_abs_lr, group = 'Control', cortype = 'partial', clust_method = 'ward.D', cut = 2)
+
+# Plot cluster anatomical positions
+clust_wrd_SA_abs = merge(parcel_positions, clust_wrd_SA_abs) # merge clusters and positions
+clust_wrd_SA_abs$cluster = factor(clust_wrd_SA_abs$cluster) # factor clusters for plotting
+
+ggplot(data = clust_wrd_SA_abs, aes(x = x, y = max(y) - y, fill = cluster))+ # plot parcel locations with fill colour for cluster
+  geom_point(size = 1, shape = 21, stroke = 0.5)+
+  geom_text(aes(label = gsub(x = cluster, pattern = 'cluster ', replacement = '')), size = 1.5, vjust = -0.8)+
+  scale_fill_viridis_d(option = "C")+
+  labs(x = 'x', y = 'y')+
+  theme(legend.position = 'none',
+        axis.text = element_blank())
+ggsave(filename = 'clust_wrd_SA_abs_positions.png', path = savepath_outputs, # save as output
+       width = 1500, height = 1080, units = 'px')
+
+# Average the clusters and export results
+SA_abs_wrd60_avg = average_clusters(SA_abs_lr, clust_wrd_SA_abs) # average within clusters for absolute SA
+pcor(SA_abs_wrd60_avg[[1]][SA_abs_wrd60_avg[[1]]$Group == 'Syn', 8:ncol(SA_abs_wrd60_avg[[1]])])$estimate # quick check of synesthete partial correlation
+write.csv(SA_abs_wrd60_avg[[1]], file = paste0(savepath_data, 'SA_abs_wrd60_avg.csv'), row.names = F) # write to .csv
+write.csv(SA_abs_wrd60_avg[[2]], file = paste0(savepath_data, 'SA_abs_wrd60_pos.csv'), row.names = F) # write cluster centroids to .csv
+
+# Resample the controls to match syn sample size and repeat cluster averaging
+set.seed(6475) # set seed with rn
+SA_abs_lr_resamp = rbind(SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(seq(1:650), size = 102),], # reform data with n = 102
+                         SA_abs_lr[SA_abs_lr$Group == 'Syn',])
+SA_abs_wrd60_avg_102 = average_clusters(SA_abs_lr_resamp, clust_wrd_SA_abs)
+write.csv(SA_abs_wrd60_avg_102[[1]], file = paste0(savepath_data, 'SA_abs_wrd60_avg_resamp.csv'), row.names = F) # write to .csv
