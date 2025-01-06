@@ -16,7 +16,7 @@ def test(a,b):
 # Function to generate a matrix of absolute partial correlations given wide-form data
 # E.g. to get partial correlations of surface areas given parcel surface areas
 # requires pandas
-def partial_corr(data):
+def partial_cor(data):
     data_cov = data.cov().values # covariance values
     precision_matrix = np.linalg.inv(data_cov) # invert cov matrix to get precision matrix
     data_pcorr = np.zeros_like(precision_matrix) # initialise zero matrix
@@ -30,6 +30,44 @@ def partial_corr(data):
     data_pcorr = pd.DataFrame(data_pcorr, index=data.columns, columns=data.columns) # turn it into a pandas DataFrame
 
     return (abs(data_pcorr)) # return the absolute partial correlations
+
+# Function to convert given data to a list of two graphs
+# Requires a csv file with mixed data for two groups, one 'Control' and one experimental given by groupname
+def data_to_graphs(filename, groupname):
+    data = pd.read_csv(filename)  # read data
+
+    pcormats = [partial_cor(data[data['Group'] == 'Control'].iloc[:, 7:]),
+                # generate partial correlations from data
+                partial_cor(data[data['Group'] == groupname].iloc[:, 7:])]  # and put into list
+
+    graphs = []  # initialise list of graphs
+    for pcormat in pcormats:  # for each partial correlation matrix
+        graphs.append(Graph(scipy.sparse.lil_matrix(pcormat), directed=False))  # generate graphs
+        remove_self_loops(graphs[-1])  # remove self-correlations
+
+    return graphs
+
+# Function to plot distributions of strengths
+# Requires a list of two graphs and will plot the distributions for each graph
+def plot_strengths(graphs):
+    strengths = []
+    for graph in graphs: # for each graph
+        weight = graph.edge_properties["weight"] # get edge weights
+        strengths.append(graph.degree_property_map("total", weight = weight).a) # get total weight for each vertex
+
+    fig = plt.figure(figsize=(10, 6)) # initialise figure
+    ax = fig.add_subplot(1, 1, 1) # add a single panel
+    counts1, bins1 = np.histogram(strengths[0], bins=30, density=True)  # get the histogram of control strengths
+    plt.plot(bins1[:-1], counts1, label='Control') # plot histogram
+    counts2, bins2 = np.histogram(strengths[1], bins=30, density=True)  # get the histogram of synesthete strengths
+    plt.plot(bins2[:-1], counts2, label='Syn') # plot histogram
+    fig.set_facecolor('white') # make background white
+    ax.set_facecolor('white') # make background white
+    plt.xlabel("Node Strength") # x-axis title
+    plt.ylabel("Density") # y-axis title
+    plt.legend() # show the legend
+    plt.title("Node Strength Distributions") # set the title
+    plt.show() # show plot
 
 # Function to calculate and agglomerate network metrics
 # currently includes: clustering, efficiency, characteristic path length, mean edge and vertex betweeness; also a histogram of shortest distances
