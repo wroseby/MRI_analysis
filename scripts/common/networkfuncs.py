@@ -32,7 +32,7 @@ def partial_cor(data):
     return (abs(data_pcorr)) # return the absolute partial correlations
 
 # Function to convert given data to a list of two graphs
-# Requires a csv file with mixed data for two groups, one 'Control' and one experimental given by groupname
+# Takes a csv file with mixed data for two groups, one 'Control' and one experimental given by groupname
 def data_to_graphs(filename, groupname):
     data = pd.read_csv(filename)  # read data
 
@@ -48,7 +48,7 @@ def data_to_graphs(filename, groupname):
     return graphs
 
 # Function to plot distributions of strengths
-# Requires a list of two graphs and will plot the distributions for each graph
+# Takes a list of just two graphs and will plot the distributions for each graph
 def plot_strengths(graphs):
     strengths = []
     for graph in graphs: # for each graph
@@ -97,11 +97,13 @@ def measure_net(graph):
 
     vb, eb = betweenness(graph, weight=graph.ep.weight_inv)  # calculate edge and vertex betweenness
 
-    net_metrics['clustering'] = clustering
-    net_metrics['efficiency'] = global_efficiency
-    net_metrics['L_obs'] = L_obs
-    net_metrics['mean_eb'] = np.mean(eb)
-    net_metrics['mean_vb'] = np.mean(vb)
+    net_metrics['clustering'] = [clustering]
+    net_metrics['efficiency'] = [global_efficiency]
+    net_metrics['L_obs'] = [L_obs]
+    net_metrics['mean_eb'] = [np.mean(eb)]
+    net_metrics['mean_vb'] = [np.mean(vb)]
+
+    net_metrics = pd.DataFrame(net_metrics)
 
     return(net_metrics, hist)
 
