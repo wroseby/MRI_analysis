@@ -33,17 +33,23 @@ def partial_cor(data):
 
 # Function to convert given data to a list of two graphs
 # Takes a csv file with mixed data for two groups, one 'Control' and one experimental given by groupname
-def data_to_graphs(filename, groupname):
+def data_to_graphs(filename, groupname = False):
     data = pd.read_csv(filename)  # read data
 
-    pcormats = [partial_cor(data[data['Group'] == 'Control'].iloc[:, 7:]),
-                # generate partial correlations from data
-                partial_cor(data[data['Group'] == groupname].iloc[:, 7:])]  # and put into list
+    if groupname: # if segregating by group
+        pcormats = [partial_cor(data[data['Group'] == 'Control'].iloc[:, 7:]), # generate partial correlations from data
+                    partial_cor(data[data['Group'] == groupname].iloc[:, 7:])]  # and put into list
 
-    graphs = []  # initialise list of graphs
-    for pcormat in pcormats:  # for each partial correlation matrix
-        graphs.append(Graph(scipy.sparse.lil_matrix(pcormat), directed=False))  # generate graphs
-        remove_self_loops(graphs[-1])  # remove self-correlations
+        graphs = []  # initialise list of graphs
+        for pcormat in pcormats:  # for each partial correlation matrix
+            graphs.append(Graph(scipy.sparse.lil_matrix(pcormat), directed=False))  # generate graphs
+            remove_self_loops(graphs[-1])  # remove self-correlations
+
+    else: # if not segregating by group
+        pcormat = partial_cor(data.iloc[:,7:]) # generate one partial correlation matrix
+
+        graphs = Graph(scipy.sparse.lil_matrix(pcormat), directed=False)
+        remove_self_loops(graphs)
 
     return graphs
 
