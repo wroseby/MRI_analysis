@@ -5,8 +5,10 @@ library(ppcor)
 library(dplyr)
 library(ggplot2)
 library(reshape2)
+library(mclust)
+library(cluster)
 
-set.seed(154) # for consistency
+set.seed(6780) # for consistency
 
 # Function to perform hierarchical cluster and plot dendrogram
 hclust.plot <- function(data, group, clust_method, cut){
@@ -47,7 +49,7 @@ ggplot(data = clust_nn_SA_abs_pos, aes(x = x, y = max(y) - y, fill = cluster))+ 
   labs(x = 'x', y = 'y')+
   theme(legend.position = 'none',
         axis.text = element_blank())
-ggsave(filename = 'clust_nn_SA_abs_positions.png', path = savepath_outputs, # save as output
+ggsave(filename = 'clust_nn_SA_abs_positions.png', path = paste0(savepath_outputs, 'hlucst/'), # save as output
        width = 1500, height = 1080, units = 'px')
 
 # Diagnostics - nearest neighbour
@@ -62,9 +64,9 @@ SA_abs_r = cbind(SA_abs[,1:7],SA_abs[,grep(x = colnames(SA_abs), pattern = '^R_'
 clust_nn_SA_abs_r = hclust.plot(SA_abs_r, group = 'Control', clust_method = 'single', cut = 90)  # cluster right parcels
 adjustedRandIndex(clust_nn_SA_abs_l[[1]]$cluster, clust_nn_SA_abs_r[[1]]$cluster) # adjusted Rand index for l vs r cluster similarity = 0.426
 
-# Repeat for resamples of control dataset (consistency)
+# Repeat for 10 resamples of control dataset (consistency)
 clust_nn_resamp = list() # initialise list of resample clusters
-set.seed(6475) # set seed with rn
+set.seed(6780)# set seed with rn
 for (i in seq(1:10)){ # for 10 resamples
   SA_abs_lr_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(1:650, size = 300, replace = F),] # take samples of 300 controls
   clust_nn_resamp[[i]] = hclust.plot(SA_abs_lr_resamp, group = 'Control', clust_method = 'single', cut = 90) # nn clustering
@@ -109,23 +111,22 @@ write.csv(SA_abs_nn90_sum[[1]], file = paste0(savepath_data, 'SA_abs_nn90_sum.cs
 write.csv(SA_abs_nn90_sum[[3]], file = paste0(savepath_data, 'SA_abs_nn90_pos.csv'), row.names = F) # write cluster centroids to .csv
 
 # Resample the controls to match syn sample size and repeat cluster averaging
-set.seed(6475) # set seed with rn
+set.seed(6780)# set seed with rn
 SA_abs_lr_resamp = rbind(SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(seq(1:650), size = 102, replace = F),], # reform data with n = 102
                          SA_abs_lr[SA_abs_lr$Group == 'Syn',])
 SA_abs_nn90_sum_102 = summarise_clusters(SA_abs_lr_resamp, clust_nn_SA_abs_pos)
 write.csv(SA_abs_nn90_sum_102[[1]], file = paste0(savepath_data, 'hclust/SA_abs_nn90_sum_resamp.csv'), row.names = F) # write to .csv
 
-# Resample the controls to match syn sample size and repeat cluster averaging, multiple times
-set.seed(6475) # set seed with rn
-for (i in seq(1:10)){
-  SA_abs_lr_cntrl_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(seq(1:650), size = 102, replace = F),] # reform data with n = 102
+# Resample the controls 6 times without replacement for unique groups
+set.seed(6780)
+sample_numbers = sample(1:650, size = 6 * 102, replace = F) # generate random samples
+sample_numbers = split(sample_numbers, ceiling(seq_along(sample_numbers)/102)) # split into 6 groups
+for (i in seq(1:6)){
+  SA_abs_lr_cntrl_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample_numbers[[i]],]
   SA_abs_nn90_sum_102 = summarise_clusters(SA_abs_lr_cntrl_resamp, clust_nn_SA_abs_pos)
   write.csv(SA_abs_nn90_sum_102[[1]], file = paste0(savepath_data, 'hclust/SA_abs_nn90_sum_cntrl_resamp_', i, '.csv'), row.names = F) # write to .csv
 }
 write.csv(SA_abs_nn90_sum[[1]][SA_abs_nn90_sum[[1]]$Group == 'Syn',], file = paste0(savepath_data, 'hclust/SA_abs_nn90_sum_syn.csv'), row.names = F) # write just the syn
-
-
-
 
 # Hierarhical cluster - Ward's method
 # Perform clustering using Ward's method
@@ -141,7 +142,7 @@ ggplot(data = clust_wrd_SA_abs_pos, aes(x = x, y = max(y) - y, fill = cluster))+
   labs(x = 'x', y = 'y')+
   theme(legend.position = 'none',
         axis.text = element_blank())
-ggsave(filename = 'clust_wrd_SA_abs_positions.png', path = savepath_outputs, # save as output
+ggsave(filename = 'clust_wrd_SA_abs_positions.png', paste0(savepath_outputs, 'hlucst/'), # save as output
        width = 1500, height = 1080, units = 'px')
 
 # Diagnostics - nearest neighbour
@@ -158,7 +159,7 @@ adjustedRandIndex(clust_wrd_SA_abs_l[[1]]$cluster, clust_wrd_SA_abs_r[[1]]$clust
 
 # Repeat for resamples of control dataset (consistency)
 clust_wrd_resamp = list() # initialise list of resample clusters
-set.seed(6475) # set seed with rn
+set.seed(6780)# set seed with rn
 for (i in seq(1:10)){ # for 10 resamples
   SA_abs_lr_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(1:650, size = 300, replace = F),] # take samples of 300 controls
   clust_wrd_resamp[[i]] = hclust.plot(SA_abs_lr_resamp, group = 'Control', clust_method = 'ward.D', cut = 2) # wrd clustering
@@ -178,16 +179,18 @@ write.csv(SA_abs_wrd60_sum[[1]], file = paste0(savepath_data, 'SA_abs_wrd60_sum.
 write.csv(SA_abs_wrd60_sum[[3]], file = paste0(savepath_data, 'SA_abs_wrd60_pos.csv'), row.names = F) # write cluster centroids to .csv
 
 # Resample the controls to match syn sample size and repeat cluster averaging
-set.seed(6475) # set seed with rn
+set.seed(6780)# set seed with rn
 SA_abs_lr_resamp = rbind(SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(seq(1:650), size = 102, replace = F),], # reform data with n = 102
                          SA_abs_lr[SA_abs_lr$Group == 'Syn',])
 SA_abs_wrd60_sum_102 = summarise_clusters(SA_abs_lr_resamp, clust_wrd_SA_abs_pos)
 write.csv(SA_abs_wrd60_sum_102[[1]], file = paste0(savepath_data, 'hclust/SA_abs_wrd60_sum_resamp.csv'), row.names = F) # write to .csv
 
-# Resample the controls to match syn sample size and repeat cluster averaging, multiple times
-set.seed(6475) # set seed with rn
-for (i in seq(1:10)){
-  SA_abs_lr_cntrl_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(seq(1:650), size = 102, replace = F),] # reform data with n = 102
+# Resample the controls without replacement for 6 unique groups
+set.seed(6780)
+sample_numbers = sample(1:650, size = 6 * 102, replace = F) # generate random samples
+sample_numbers = split(sample_numbers, ceiling(seq_along(sample_numbers)/102)) # split into 6 groups
+for (i in seq(1:6)){
+  SA_abs_lr_cntrl_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample_numbers[[i]],]
   SA_abs_wrd60_sum_102 = summarise_clusters(SA_abs_lr_cntrl_resamp, clust_wrd_SA_abs_pos)
   write.csv(SA_abs_wrd60_sum_102[[1]], file = paste0(savepath_data, 'hclust/SA_abs_wrd60_sum_cntrl_resamp_', i, '.csv'), row.names = F) # write to .csv
 }

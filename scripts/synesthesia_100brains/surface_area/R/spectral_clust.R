@@ -68,7 +68,7 @@ spectral_clust = function(data, group, n_clusters, normalise = F){
 }
 
 # Spectral clustering of partial correlation matrix (unormalised laplacian)
-set.seed(6475) # set seed with rn
+set.seed(6780) # set seed with rn
 clust_spec_SA_abs = spectral_clust(SA_abs_lr, group = 'Control', n_clusters = 90, normalise = F)
 
 # Plot cluster anatomical positions
@@ -81,7 +81,7 @@ ggplot(data = clust_spec_SA_abs_pos, aes(x = x, y = max(y) - y, fill = cluster))
   labs(x = 'x', y = 'y')+
   theme(legend.position = 'none',
         axis.text = element_blank())
-ggsave(filename = 'clust_spec_SA_abs_positions.png', path = savepath_outputs, # save as output
+ggsave(filename = 'clust_spec_SA_abs_positions.png', paste0(savepath_outputs, 'spectral_clust/'), # save as output
        width = 1500, height = 1080, units = 'px')
 
 # Diagnostics
@@ -90,7 +90,7 @@ sil_scores = silhouette(x = as.integer(clust_spec_SA_abs[[1]][,2]), dist = as.di
 mean(sil_scores[,"sil_width"]) # mean silhouette width = 0.127
 
 # Repeat separately for left and right hemispheres (consistency)
-set.seed(6475) # set seed with rn
+set.seed(6780) # set seed with rn
 SA_abs_l = cbind(SA_abs[,1:7],SA_abs[,grep(x = colnames(SA_abs), pattern = '^L_')]) # select left parcels
 clust_spec_SA_abs_l = spectral_clust(SA_abs_l, group = 'Control', n_clusters = 90, normalise = F) # cluster left parcels
 SA_abs_r = cbind(SA_abs[,1:7],SA_abs[,grep(x = colnames(SA_abs), pattern = '^R_')]) # select right parcels
@@ -99,7 +99,7 @@ adjustedRandIndex(clust_spec_SA_abs_l[[1]]$cluster, clust_spec_SA_abs_r[[1]]$clu
 
 # Repeat for resamples of control dataset (consistency)
 clust_spec_resamp = list() # initialise list of resample clusters
-set.seed(6475) # set seed with rn
+set.seed(6780) # set seed with rn
 for (i in seq(1:10)){
   SA_abs_lr_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(1:650, size = 300, replace = F),] # take samples of 300 controls
   clust_spec_resamp[[i]] = spectral_clust(SA_abs_lr_resamp, group = 'Control', n_clusters = 90, normalise = F) # spectral clustering
@@ -144,19 +144,21 @@ write.csv(SA_abs_spec90_avg[[1]], file = paste0(savepath_data, 'spectral_clust/S
 write.csv(SA_abs_spec90_avg[[1]], file = paste0(savepath_data, 'spectral_clust/SA_abs_spec90_avg.csv'), row.names = F) # write to .csv
 write.csv(SA_abs_spec90_avg[[3]], file = paste0(savepath_data, 'spectral_clust/SA_abs_spec90_pos.csv'), row.names = F) # write cluster centroids to .csv
 
-# Resample the controls to match syn sample size and repeat cluster averaging, multiple times
-set.seed(6475) # set seed with rn
-for (i in seq(1:10)){
-  SA_abs_lr_cntrl_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(seq(1:650), size = 102, replace = F),] # reform data with n = 102
-  SA_abs_spec90_avg_102 = summarise_clusters(SA_abs_lr_cntrl_resamp, clust_spec_SA_abs_pos)
-  write.csv(SA_abs_spec90_avg_102[[1]], file = paste0(savepath_data, 'spectral_clust/SA_abs_spec90_sum_cntrl_resamp_', i, '.csv'), row.names = F) # write to .csv
+# Resample the controls 6 times without replacement for unique groups
+set.seed(6780)
+sample_numbers = sample(1:650, size = 6 * 102, replace = F) # generate random samples
+sample_numbers = split(sample_numbers, ceiling(seq_along(sample_numbers)/102)) # split into 6 groups
+for (i in seq(1:6)){
+  SA_abs_lr_cntrl_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample_numbers[[i]],]
+  SA_abs_spec90_sum_102 = summarise_clusters(SA_abs_lr_cntrl_resamp, clust_spec_SA_abs_pos)
+  write.csv(SA_abs_spec90_sum_102[[1]], file = paste0(savepath_data, 'spectral_clust/SA_abs_spec90_sum_cntrl_resamp_', i, '.csv'), row.names = F) # write to .csv
 }
-write.csv(SA_abs_spec90_avg[[1]][SA_abs_spec90_avg[[1]]$Group == 'Syn',], file = paste0(savepath_data, 'spectral_clust/SA_abs_spec90_sum_syn.csv'), row.names = F) # write just the syn
+
 
 
 # Repeat for 60 spectral clusters
 # Spectral clustering of partial correlation matrix (unormalised laplacian)
-set.seed(6475) # set seed with rn
+set.seed(6780) # set seed with rn
 clust_spec_SA_abs = spectral_clust(SA_abs_lr, group = 'Control', n_clusters = 60, normalise = F)
 
 # Plot cluster anatomical positions
@@ -169,7 +171,7 @@ ggplot(data = clust_spec_SA_abs_pos, aes(x = x, y = max(y) - y, fill = cluster))
   labs(x = 'x', y = 'y')+
   theme(legend.position = 'none',
         axis.text = element_blank())
-ggsave(filename = 'clust_spec_SA_abs_positions.png', path = savepath_outputs, # save as output
+ggsave(filename = 'clust_spec_SA_abs_positions.png', paste0(savepath_outputs, 'spectral_clust/'), # save as output
        width = 1500, height = 1080, units = 'px')
 
 # Diagnostics
@@ -178,7 +180,7 @@ sil_scores = silhouette(x = as.integer(clust_spec_SA_abs[[1]][,2]), dist = as.di
 mean(sil_scores[,"sil_width"]) # mean silhouette width = 0.127
 
 # Repeat separately for left and right hemispheres (consistency)
-set.seed(6475) # set seed with rn
+set.seed(6780) # set seed with rn
 SA_abs_l = cbind(SA_abs[,1:7],SA_abs[,grep(x = colnames(SA_abs), pattern = '^L_')]) # select left parcels
 clust_spec_SA_abs_l = spectral_clust(SA_abs_l, group = 'Control', n_clusters = 60) # cluster left parcels
 SA_abs_r = cbind(SA_abs[,1:7],SA_abs[,grep(x = colnames(SA_abs), pattern = '^R_')]) # select right parcels
@@ -187,7 +189,7 @@ adjustedRandIndex(clust_spec_SA_abs_l[[1]]$cluster, clust_spec_SA_abs_r[[1]]$clu
 
 # Repeat for resamples of control dataset (consistency)
 clust_spec_resamp = list() # initialise list of resample clusters
-set.seed(6475) # set seed with rn
+set.seed(6780) # set seed with rn
 for (i in seq(1:10)){
   SA_abs_lr_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(1:650, size = 300, replace = F),] # take samples of 300 controls
   clust_spec_resamp[[i]] = spectral_clust(SA_abs_lr_resamp, group = 'Control', n_clusters = 60) # spectral clustering
@@ -206,11 +208,13 @@ write.csv(SA_abs_spec60_avg[[1]], file = paste0(savepath_data, 'spectral_clust/S
 write.csv(SA_abs_spec60_avg[[1]], file = paste0(savepath_data, 'spectral_clust/SA_abs_spec60_avg.csv'), row.names = F) # write to .csv
 write.csv(SA_abs_spec60_avg[[3]], file = paste0(savepath_data, 'spectral_clust/SA_abs_spec60_pos.csv'), row.names = F) # write cluster centroids to .csv
 
-# Resample the controls to match syn sample size and repeat cluster averaging, multiple times
-set.seed(6475) # set seed with rn
-for (i in seq(1:10)){
-  SA_abs_lr_cntrl_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample(seq(1:650), size = 102, replace = F),] # reform data with n = 102
-  SA_abs_spec60_avg_102 = summarise_clusters(SA_abs_lr_cntrl_resamp, clust_spec_SA_abs_pos)
-  write.csv(SA_abs_spec60_avg_102[[1]], file = paste0(savepath_data, 'spectral_clust/SA_abs_spec60_sum_cntrl_resamp_', i, '.csv'), row.names = F) # write to .csv
+# Resample the controls without replacement for 6 unique groups
+set.seed(6780)
+sample_numbers = sample(1:650, size = 6 * 102, replace = F) # generate random samples
+sample_numbers = split(sample_numbers, ceiling(seq_along(sample_numbers)/102)) # split into 6 groups
+for (i in seq(1:6)){
+  SA_abs_lr_cntrl_resamp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample_numbers[[i]],]
+  SA_abs_spec60_sum_102 = summarise_clusters(SA_abs_lr_cntrl_resamp, clust_spec_SA_abs_pos)
+  write.csv(SA_abs_spec60_sum_102[[1]], file = paste0(savepath_data, 'spectral_clust/SA_abs_spec60_sum_cntrl_resamp_', i, '.csv'), row.names = F) # write to .csv
 }
-write.csv(SA_abs_spec60_avg[[1]][SA_abs_spec60_avg[[1]]$Group == 'Syn',], file = paste0(savepath_data, 'spectral_clust/SA_abs_spec60_sum_syn.csv'), row.names = F) # write just the syn
+write.csv(SA_abs_spec60_sum[[1]][SA_abs_spec60_sum[[1]]$Group == 'Syn',], file = paste0(savepath_data, 'spectral_clust/SA_abs_spec60_sum_syn.csv'), row.names = F) # write just the syn
