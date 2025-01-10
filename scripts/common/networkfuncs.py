@@ -87,7 +87,7 @@ def measure_net(graph):
     for e in graph.edges(): # for all the graph edges
         weight_inv[e] = 1.0 / graph.ep.weight[e]  # get inverted weights
     graph.ep['weight_inv'] = weight_inv # set inverted weights as graph edge property
-    hist = distance_histogram(graph, weight = graph.ep.weight_inv, bins=[0,0.1]) # get distance histogram with inverted weights
+    hist = distance_histogram(graph, weight = graph.ep.weight_inv, bins=[0,0.5]) # get distance histogram with inverted weights
     total_efficiency = 0.0  # initialise total efficiency for graph
     count = 0  # initialise a count
     distances = shortest_distance(graph, weights=graph.ep.weight_inv) # shortest distances between vertices using inverted weights
@@ -234,9 +234,37 @@ def SWP(cormat, dists, C_obs, L_obs):
     delta_C = (C_latt - C_obs) / (C_latt - C_rand)
     delta_L = (L_obs - L_rand) / (L_latt - L_rand)
 
+    # calculate SWP
     SWP = np.sqrt((delta_C**2 + delta_L**2) / 2) # calculate SWP
     alpha = np.arctan(delta_L / delta_C) # get angle of divergence vector
     delta = (((4 * alpha) / np.pi) - 1) # get delta value
-    delta =  np.clip(delta, -1, 1) # set range
+    delta = np.clip(delta, -1, 1) # set range
 
     return SWP, delta
+
+# Function to calculate Hedge's g
+def hedges_g(data, population_mean):
+    """
+    Calculate Hedges' g for a one-sample test.
+
+    Parameters:
+        data (array-like): The sample data.
+        population_mean (float): The hypothesized population mean.
+
+    Returns:
+        float: Hedges' g.
+    """
+    # sample statistics
+    n = len(data)
+    sample_mean = np.mean(data)
+    sample_std = np.std(data, ddof=1)  # Use ddof=1 for sample standard deviation
+
+    # get Cohen's d
+    cohen_d = (sample_mean - population_mean) / sample_std
+
+    # get the correction factor for Hedges' g
+    correction_factor = 1 - (3 / (4 * n - 1))
+
+    # get Hedges' g
+    hedges_g = cohen_d * correction_factor
+    return hedges_g
