@@ -1,0 +1,486 @@
+---
+title: "Spectral clustering of HCP parcels"
+output:
+  pdf_document: default
+  
+params:
+  seed: 7842
+  #28947 (65 clusters; some expected differences in matched sample comparison)
+  #7842 (71 clusters; some expected differences in matched sample comparison)
+---
+
+## Absolute surface area
+**Prerequisites:** surface area data for 360 HCP parcels in .csv format with metadata in columns 1 through 8.  
+
+This is a notebook to perform spectral  clustering of partial correlations between HCP parcels. The purpose of this approach is to reduce the number of nodes to below 100 so we can use partial correlations to form networks for a synesthete sample of n = 102 participants. In general, clustering will be performed on left-right averaged data from the control sample of n = 650 participants. However, we will run diagnostics on the clusters, including examining consistency between multiple resamples of n = 300 controls.  Partial correlations will be clustered using eta-squared as a measure of similarity between parcels:
+
+$$ \eta^{2} = 1 - \frac{\sum{(x-y)^2}}{\sum{(x - \bar{x})^{2}} + \sum{(y - \bar{y})^{2}}}$$
+Where x and y are columns of the partial correlation matrix. Spectral clustering works by finding the eigenvectors of the similarity matrix, then performing k-means clustering to cluster data according to its proximity to the eigenvectors.Once an optimal clustering is found via diagnostic measures, we will summarise the results within clusters before exporting the results for network analysis with python.
+
+```{r include=F}
+# Load packages #
+library(ppcor)
+library(dendextend)
+library(dplyr)
+library(viridis)
+library(ggplot2)
+library(reshape2)
+library(mclust)
+library(cluster)
+library(clValid)
+library(igraph)
+library(MatchIt)
+library(gridExtra)
+```
+```{r include=F}
+# Define functions #
+
+# Function to normalise a range of numbers to 0-1
+normalise = function(x) (x - min(x, na.rm = T)) / (max(x, na.rm = T) - min(x, na.rm = T))
+
+# Function to average data across left and right parcels
+lr_average = function(data){ #
+  parcel_data = data[,grepl(pattern='^[L,R]_', x=colnames(data))] 
+  parcels_LR = unique(sub("^[LR]_", "", colnames(parcel_data))) 
+  data_lr = list() 
+  for (parcel in parcels_LR) {
+    l_col = paste0("L_", parcel)
+    r_col = paste0("R_", parcel)
+    data_lr[[parcel]] = rowMeans(parcel_data[, c(l_col, r_col)], na.rm = TRUE) 
+  }
+  data_lr = as.data.frame(data_lr) 
+  data_lr = cbind(data[,!grepl(pattern='^[L,R]_', x=colnames(data))], data_lr) 
+  colnames(data_lr) = gsub(x = colnames(data_lr), pattern = '^X', replacement = '') 
+  return(data_lr)
+}
+
+# Function to calculate eta squared
+eta_squared = function(x, y) {
+  1 - sum((x - y)^2) / (sum((x - mean(x))^2) + sum((y - mean(y))^2))
+}
+
+# Function to perform spectral clustering
+spectral_clust = function(data, group, n_clusters, normalise = F, plot_vectors = F, seed = params$seed){
+  
+  # get partial correlation in desired group
+  cormat = pcor(x = data[data$Group == group, 8:ncol(data)],
+                method = 'pearson')$estimate
+  
+  # create similarity matrix using eta-squared from the input matrix
+  n = ncol(cormat)
+  S = matrix(0, n, n)
+  rownames(S) = colnames(S) = colnames(cormat)
+  for (i in 1:n) {
+    for (j in 1:n) {
+      S[i, j] <- eta_squared(cormat[, i], cormat[, j])
+    }
+  }
+  diag(S) = 1 # set diagonal to 1
+  D = diag(rowSums(S)) # degree matrix
+  L = D - S # Laplacian
+  
+  if (normalise == T){ 
+    # symmetrically normalised laplacian
+    #L = sqrt(ginv(D)) %*% L %*% sqrt(ginv(D)) # produces NaNs due to small weights of some nodes
+    
+    # random walk laplacian
+    L = ginv(D) %*% L
+  }
+  
+  # eigendecomposition of the Laplacian
+  eigen_decomp = eigen(L)
+
+  # get desired eigenvectors and normalise
+  U = eigen_decomp$vectors[, (ncol(eigen_decomp$vectors) - n_clusters + 1):ncol(eigen_decomp$vectors)]
+  row_norms = sqrt(rowSums(U^2))
+  U = sweep(U, 1, row_norms, "/") # normalise U
+  set.seed(seed)
+  clusters = kmeans(U, centers = n_clusters, nstart = 10)$cluster # k-means clustering
+  
+  # reorder the clusters to match data order
+  unique_clusters = unique(clusters) # get unique clusters
+  cluster_order = match(clusters, unique_clusters) # map the original clusters to unique clusters
+  ordered_clusters = rep(NA, length(clusters)) # initialise ordered clusters
+  for (i in seq_along(unique_clusters)) {
+    ordered_clusters[clusters == unique_clusters[i]] <- i # reset order
+  }
+  
+  # build the output data
+  spectral_clusters = data.frame(Area = colnames(cormat), cluster = ordered_clusters)
+  
+  # plot the clusters on the first two eigenvectors
+  if (plot_vectors == T){
+  plot(U[, 1], U[, 2], col = clusters, pch = 19,
+       xlab = "Eigenvector 1", ylab = "Eigenvector 2", main = "Spectral Clustering") 
+  }
+  
+  # return the clusters and similarity matrix for diagnostics
+  return(list(spectral_clusters, S))
+}
+
+# Function to iterate through a desired clustering cutoff and report diagnostics
+optimal_cluster = function(data, k, seed){
+  # get lr-averaged data from full data
+  data_lr = lr_average(data)
+  
+  # initialise diagnostic scores
+  mean_silhouettes = vector()
+  dunn_indices = vector()
+  lr_aris = vector()
+  resample_mean_aris = vector()
+  mods = vector()
+
+  # iterate through cutoff values
+  for (i in seq_along(k)){
+    
+    # perform clustering
+    clustering = spectral_clust(data_lr, group = 'Control', n_clusters = k[i])
+  
+    # internal metrics - silhouette scores and Dunn indices
+    sil_scores = silhouette(x = as.integer(clustering[[1]][,2]), dist = as.dist(1 - clustering[[2]]))
+    mean_silhouettes[i] = mean(sil_scores[,"sil_width"]) 
+    dunn_indices[i] = dunn(distance = as.dist(1 - clustering[[2]]), clusters = as.integer(clustering[[1]][,2]))
+    
+    # score checks
+    #print(mean_silhouettes[i])
+    #print(dunn_indices[i])
+  
+    # external consistency - adjusted Rand index for clustering of left vs right
+    set.seed(seed)
+    data_l = cbind(data[,1:7], data[,grep(x = colnames(data), pattern = '^L_')])
+    clustering_l = spectral_clust(data_l, group = 'Control', n_clusters = k[i])
+    data_r = cbind(data[,1:7], data[,grep(x = colnames(data), pattern = '^R_')])
+    clustering_r = spectral_clust(data_r, group = 'Control', n_clusters = k[i])
+    lr_aris[i] = adjustedRandIndex(clustering_l[[1]]$cluster, clustering_r[[1]]$cluster) 
+  
+    # external consistency - adjusted Rand index for 10 resamples of 300 participants
+    clustering_resamp = list()
+    set.seed(seed)
+    for (j in seq(1:10)){ 
+      # take resamples and cluster
+      data_lr_resamp = data_lr[data_lr$Group == 'Control',][sample(1:650, size = 300, replace = F),] 
+      clustering_resamp[[j]] = spectral_clust(data_lr_resamp, group = 'Control', n_clusters = k[i])
+    }
+    # get adjusted Rand index for every combination of the 10 clusterings
+    clustering_resamp_ari = vector() 
+    for (j in 1:ncol(combn(10,2))){ 
+      resamp1 = clustering_resamp[[combn(10,2)[,j][1]]][[1]]
+      resamp2 = clustering_resamp[[combn(10,2)[,j][2]]][[1]]
+      clustering_resamp_ari[j] = adjustedRandIndex(resamp1[order(resamp1$Area),]$cluster,
+                                                resamp2[order(resamp2$Area),]$cluster)
+    }
+    # then get the mean ARI
+    resample_mean_aris[i] = mean(clustering_resamp_ari)
+    
+    # score checks
+    #print(lr_aris[i])
+    #print(resample_mean_aris[i])
+    
+    # get graph modularity - optional
+    S = clustering[[2]]
+    #diag(S) = 0
+    S = abs(S) # must be non-negative weights
+    graph = graph_from_adjacency_matrix(S, mode = "undirected", weighted = TRUE)
+    V(graph)$cluster = clustering[[1]][,2]
+    mods[i] = modularity(graph, membership = V(graph)$cluster, weights = E(graph)$weight)
+
+  }
+  # normalise the scores
+  mean_silhouettes_n = normalise(mean_silhouettes)
+  dunn_indices_n = normalise(dunn_indices)
+  lr_aris_n = normalise(lr_aris)
+  resample_mean_aris_n = normalise(resample_mean_aris)
+  mods_n = normalise(mods) # generally decreases with increasing k
+  
+  # aggregate scores and find the optimal clustering
+  agg_score = (mean_silhouettes_n + dunn_indices_n + lr_aris_n + resample_mean_aris_n)
+  optimal_cluster_number = k[which(agg_score == max(agg_score, na.rm = T))]
+  
+  # return the recommended cut and the table of scores
+  return(list(agg_score, optimal_cluster_number))
+}
+
+# Function to summarise data within clusters for both controls and synesthetes
+summarise_clusters = function(data, clusters){ 
+  # convert parcel data to long form for merging
+  data_long = melt(data[,c(1,8:ncol(data))]) 
+  # rename columns to ensure correct merge
+  colnames(data_long) = c('ID', 'Area', 'value') 
+  # merge data with the cluster assignments
+  data_long = merge(data_long, clusters, by = 'Area')
+  
+  # summarise within clusters - sum and mean of parcel statistic, plus mean of 2D coordinates and broad region
+  data_summarised = data_long %>% 
+    group_by(ID, cluster) %>%
+    summarise(sum_value = sum(value),
+              mean_value = mean(value), 
+              x = mean(x), 
+              y = mean(y),
+              Region = first(Region)) 
+  
+  # convert back to wide form and bind with metadata
+  data_wide_sum = dcast(data_summarised, ID ~ cluster, value.var = 'sum_value')
+  data_wide_sum = merge(data[,1:7], data_wide_sum, by = 'ID')
+  data_wide_mean = dcast(data_summarised, ID ~ cluster, value.var = 'mean_value')
+  data_wide_mean = merge(data[,1:7], data_wide_mean, by = 'ID')
+  
+  # separately get the centroids of x and y positions for cluster positions
+  data_pos = unique(dplyr::select(ungroup(data_summarised), 2,5,6,7)) # select cluster column, mean x and mean y columns
+  
+  # return the summed values, mean values and cluster positions for plotting
+  return(list(data_wide_sum, data_wide_mean, data_pos))
+}
+
+# Function to calculate and plot partial correlation distributions according to a grouping variable
+plot_pcors = function(data_list, nclust, group_vec){
+  # generate partial correlations
+  pcor_list = lapply(data_list, FUN = function(df){pcor(df[,8:ncol(df)])$estimate})
+  # melt to long form
+  pcor_list = lapply(pcor_list, FUN = function(df){df = melt(df)})
+  # add desired grouping variable
+  for (i in 1:length(pcor_list)){
+    pcor_list[[i]]$Group = group_vec[i]
+  }
+  # bind into one dataframe
+  pcors = bind_rows(pcor_list, .id = 'Sample')
+  
+  # plot partial correlation distributions
+  pcors$Group = factor(pcors$Group, levels = unique(group_vec))
+  pcors$Sample = factor(pcors$Sample)
+  ggplot(data = pcors, aes(x = value, color = Group, group = Sample))+ 
+    geom_density(lwd = 1.05)+
+    scale_color_manual(values = c('blue', 'red'))+
+    labs(x = 'Partial correlation', y = 'Density')+
+    theme(legend.position = 'top')
+}
+
+```
+
+
+
+```{r include=F}
+# Read in data and set paths for saving #
+datapath =  'D:/Documents/Academia/projects/ward_lab/MRI_analysis/datasets/synesthesia_100brains/'
+savepath_data = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/shared/synesthesia_100brains/surface_area/'
+savepath_outputs = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/outputs/synesthesia_100brains/surface_area/R/'
+SA_abs = read.csv(paste0(datapath, '/surface_area/biomarker_S1C_harm.csv'), row.names = 1)
+SA_rel = read.csv(paste0(datapath, '/surface_area/biomarker_S1A_harm.csv'), row.names = 1)
+parcel_positions = read.csv(paste0(datapath, '/common/parcel_positions_flat.csv'))
+SA_abs_lr = lr_average(SA_abs)
+```
+# Finding optimal number of spectral clusters
+
+To achieve a specific clustering, we have to specify an integer number of clusters *k* for the k-means clustering. To find the optimal number of clusters for our data, we will iterate through *k = 10* to *k = 100*, and find the most optimal number based on a combination of consistency (left vs right, control resamples), cluster assignment and modularity. The code below will iterate through values of *k* and report the optimal number of clusters:
+```{r}
+k = seq(from = 10, to = 100, by = 1)
+clust_spec_optimum = optimal_cluster(data = SA_abs,
+                                     k = k, 
+                                     seed = params$seed)
+print(paste0('Optimal number of spectral clusters = ', clust_spec_optimum[[2]]))
+nclust = clust_spec_optimum[[2]] # set for following analysis
+```
+
+It seems the optimal number of clusters is `r print(nclust)`. Let's reform the clustering, and plot the first two eigenvectors as well as the cluster locations on the 2D cortical sheet.
+
+```{r}
+# Form clusters and plot two eigenvectors
+clust_spec = spectral_clust(SA_abs_lr, group = 'Control', n_clusters = nclust, 
+                        normalise = F, plot_vectors = T)
+
+# Plot cluster anatomical positions
+clust_spec_pos = merge(parcel_positions, clust_spec[[1]]) # merge clusters and positions
+clust_spec_pos$cluster = factor(clust_spec_pos$cluster) # factor clusters for plotting
+ggplot(data = clust_spec_pos, aes(x = x, y = max(y) - y, fill = cluster))+
+  geom_point(size = 0.8, shape = 21, stroke = 0.5)+
+  geom_text(aes(label = gsub(x = cluster, pattern = 'cluster ', replacement = '')), size = 2, vjust = -0.5)+
+  scale_fill_viridis_d(option = "C")+
+  labs(x = 'x', y = 'y')+
+  theme(legend.position = 'none',
+        axis.text = element_blank())
+
+```
+The clusters seem to form according to anatomical location, with proximal parcels falling into the same cluster. The number of parcels in a cluster varies from about 1 to 4.
+
+Let's summarise the data within the clusters and export it to a .csv file for analysis in python. Since we want to be able to carry out some statistical comparison with empirical data, we will subsample the control dataset of n = 650 for six subsamples of n = 102, to match the synesthete sample size. 
+
+```{r message=F, warning = F}
+# Generate 6 groups of 102 random sample numbers
+set.seed(params$seed)
+sample_numbers = sample(1:650, size = 6 * 102, replace = F)
+sample_numbers = split(sample_numbers, ceiling(seq_along(sample_numbers)/102))
+
+# Sample controls, summarise within clusters and write to .csv
+SA_abs_spec_sum_102 = list()
+for (i in seq(1:6)){
+  SA_abs_lr_cntrl_samp = SA_abs_lr[SA_abs_lr$Group == 'Control',][sample_numbers[[i]],]
+  SA_abs_spec_sum_102[[i]] = summarise_clusters(SA_abs_lr_cntrl_samp, clust_spec_pos)
+  write.csv(SA_abs_spec_sum_102[[i]][[1]], 
+            file = paste0(savepath_data, 
+                          'spectral_clust/SA_abs_spec_sum_cntrl_samp_', i, '.csv'), row.names = F)
+}
+# Summarise clusters for synesthetes and write to .csv
+SA_abs_spec_sum_syn = summarise_clusters(SA_abs_lr[SA_abs_lr$Group == 'Syn',], clust_spec_pos)
+write.csv(SA_abs_spec_sum_syn[[1]], file = paste0(savepath_data, 
+                                                  'spectral_clust/SA_abs_spec_sum_syn.csv'), row.names = F) 
+
+# Write one .csv for cluster locations (parcel centroids)
+write.csv(SA_abs_spec_sum_syn[[3]], file = paste0(savepath_data, 
+                                                  'spectral_clust/SA_abs_spec_pos.csv'), row.names = F) 
+```
+This has exported 6 control files and one synesthete file to the shared data folder, under 'hclust'. We'll use this data with python for further analysis.
+
+While we're here, it will be useful to plot the distributions of partial correlations for the subsamples we created. First, let's look at the results of a clustering summary:
+
+```{r}
+# Print within cluster sums for synesthetes
+print(head(SA_abs_spec_sum_syn[[1]]))
+```
+
+```{r}
+# Compile subsamples into one list
+SA_abs_spec_samp = lapply(SA_abs_spec_sum_102, FUN = function(list){list[[1]]})
+SA_abs_spec_samp[[7]] = SA_abs_spec_sum_syn[[1]]
+
+# Plot partial correlation distributions
+plot_pcors(data_list = SA_abs_spec_samp, nclust = nclust, group_vec = c(rep('Control', 6), 'Syn'))
+```
+In testing, the results seem to change depending on the seed we use to generate the subsamples. I wonder if this has anything to do with other variables like age, sex and scan site. Below, we will generate some matched control samples based on these three variables and compare the effects of these of the partial correlation distributions.
+
+# Effects of covariates on cluster partial correlations
+
+## Sex
+
+We start by looking at sex. Let's first check how many of each sex we have in our control sample:
+```{r}
+print(paste0('Number of females = ', nrow(SA_abs[SA_abs$Sex == 1,])))
+print(paste0('Number of males = ', nrow(SA_abs[SA_abs$Sex == 2,])))
+```
+
+Since we only have 178 males, we will have to select an equal (or smaller) number of females for comparison. These should also be as close in possible in age and dataset origin. To achieve this we'll employ optimal matching using the MatchIt package.
+
+```{r}
+# Convert categorical variables to factors
+SA_abs$Sex = factor(SA_abs$Sex)
+SA_abs$Scan = factor(SA_abs$Scan)
+
+# Match the control data by sex
+SA_abs_cntrl = SA_abs[SA_abs$Group == 'Control',]
+matched = matchit(Sex ~ Age + Scan, data = SA_abs_cntrl, method = "optimal", ratio = 1)
+SA_abs_matched = match.data(matched)
+print(table(SA_abs_matched$Sex))
+```
+Here we have a total sample of 155 males and 155 females, matched for their age and scan type. Let's summarise data within our set of clusters and plot the partial correlations for each. Note that the `plot_pcors()` function requires data split into a list, along with a grouping vector that describes the group of each set of data in the list.
+
+```{r message=F, warning=F}
+# Remove additional columns, lr average, and summarise within clusters
+SA_abs_matched = SA_abs_matched[,-c(368:370)]
+SA_abs_matched = lr_average(SA_abs_matched)
+SA_abs_matched_clust = summarise_clusters(SA_abs_matched, clust_spec_pos)
+SA_abs_matched_clust = split(SA_abs_matched_clust[[1]], SA_abs_matched_clust[[1]]$Sex)
+
+# Plot partial correlation distributions
+plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, group_vec = c('Female', 'Male'))
+```
+
+It looks like males and females are broadly similar here, with males having a bit of bias towards more negative correlations. 
+
+In trying different seeds, the direction and size of the difference varies but there is usually a small difference.
+
+## Age
+Since age is a numerical variable and not suitable for plotting different groups, we will group ages into three categories: <22, 22-35, and >35 to see if there are any differences. However, because matching requires splitting into two groups, we will have to perform pairwise comparisons.
+```{r message=F, warning=F}
+# Create age groups
+SA_abs_cntrl = SA_abs[SA_abs$Group == 'Control',]
+SA_abs_cntrl$Age_group = ifelse(SA_abs_cntrl$Age < 22, 'Young', 'Middle')
+SA_abs_cntrl$Age_group = ifelse(SA_abs_cntrl$Age > 35, 'Old', SA_abs_cntrl$Age_group)
+SA_abs_cntrl$Age_group = factor(SA_abs_cntrl$Age_group, levels = c('Young', 'Middle', 'Old'))
+SA_abs_cntrl$Age = SA_abs_cntrl$Age_group # replace age column
+SA_abs_cntrl = SA_abs_cntrl[,-368] # remove age groups column
+
+# Iterate over pairwise comparisons
+age_combos = combn(c('Young', 'Middle', 'Old'), 2)
+plots = list()
+for (i in 1:ncol(age_combos)){
+  matched = matchit(Age ~ Sex + Scan, 
+                    data = SA_abs_cntrl[SA_abs_cntrl$Age == age_combos[,i][1] | SA_abs_cntrl$Age == age_combos[,i][2],], 
+                    method = "optimal", ratio = 1)
+  SA_abs_matched = match.data(matched)
+  SA_abs_matched = SA_abs_matched[,-c(368:370)]
+  SA_abs_matched = lr_average(SA_abs_matched)
+  print(table(SA_abs_matched$Age))
+  SA_abs_matched_clust = summarise_clusters(SA_abs_matched, clust_spec_pos)
+  SA_abs_matched_clust[[1]]$Age = factor(SA_abs_matched_clust[[1]]$Age, 
+                                         levels = unique(age_combos[,i]))
+  SA_abs_matched_clust = split(SA_abs_matched_clust[[1]], SA_abs_matched_clust[[1]]$Age)
+  plots[[i]] = plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, group_vec = age_combos[,i])
+}
+
+grid.arrange(grobs = plots, ncol = 3, widths = c(3,3,3))
+```
+Interesting results. It appears that participants <22 years have stronger and more variable correlations when compared to participants 22-35 years. However, there is no difference between participants <22 years and those >35 years. Finally, when comparing the participants 22-35 years and >35 years, there is also no difference. The differences in the spread of the distributions between comparisons is likely explained by the differences in sample sizes in each matched sample. 
+
+In trying with different seeds, the results vary here, but there is usually some sort of notably difference in one or two of the comparisons.
+
+## Scan type
+Let's start by checking the numbers of different scan types in the data.
+```{r}
+# Check numbers of scan types
+print(table(SA_abs$Scan))
+```
+Because the 'HCP_YA_CISC' numbers are low, we will have to discard this scan type and do three pairwise comparisons. Let's implement this as we did above for the ages groups:
+
+```{r message=F, warning=F}
+# Remove YA_CISC scans
+SA_abs_cntrl = SA_abs[SA_abs$Group == 'Control',]
+SA_abs_cntrl = SA_abs[SA_abs$Scan != 'HCP_YA_CISC',]
+SA_abs_cntrl$Scan = factor(SA_abs_cntrl$Scan, levels = unique(SA_abs_cntrl$Scan))
+
+# Iterate over pairwise comparisons
+scan_combos = combn(c('HCP_YA_Database', 'HCP_DA_Database', 'HCP_DA_CISC'), 2)
+plots = list()
+for (i in 1:ncol(age_combos)){
+  matched = matchit(Scan ~ Sex + Age, 
+                    data = SA_abs_cntrl[SA_abs_cntrl$Scan == scan_combos[,i][1] | SA_abs_cntrl$Scan == scan_combos[,i][2],], 
+                    method = "optimal", ratio = 1)
+  SA_abs_matched = match.data(matched)
+  SA_abs_matched = SA_abs_matched[,-c(368:370)]
+  SA_abs_matched = lr_average(SA_abs_matched)
+  print(table(SA_abs_matched$Scan))
+  SA_abs_matched_clust = summarise_clusters(SA_abs_matched, clust_spec_pos)
+  SA_abs_matched_clust[[1]]$Scan = factor(SA_abs_matched_clust[[1]]$Scan, 
+                                         levels = unique(scan_combos[,i]))
+  SA_abs_matched_clust = split(SA_abs_matched_clust[[1]], SA_abs_matched_clust[[1]]$Scan)
+  plots[[i]] = plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, group_vec = scan_combos[,i])
+}
+
+grid.arrange(grobs = plots, ncol = 3)
+```
+There doesn't seem to be many differences between the scans when we do pairwise comparison, except a slight difference between the CISC DA and HCP DA. As with age, there are some differences in the spread of correlations in each comparison due to differences in sample size.
+
+In trying with different seeds, there is most often a small discrepancy between the DA CISC and DA HCP.
+
+## Matched controls and synesthetes
+
+Since all these covariates appear to affect the correlation distributions to at least some degree, let's now compare the 102 synesthetes with 102 controls matched by these covariates. 
+
+```{r message=F, warning=F}
+# Match controls and synesthetes by sex and age
+SA_abs$Group = factor(SA_abs$Group, levels = c('Control', 'Syn'))
+matched = matchit(Group ~ Sex + Age + Scan, data = SA_abs, method = "optimal", ratio = 1)
+SA_abs_matched = match.data(matched)
+
+# Remove additional columns, lr average, and summarise within clusters
+SA_abs_matched = SA_abs_matched[,-c(368:370)]
+SA_abs_matched = lr_average(SA_abs_matched)
+SA_abs_matched_clust = summarise_clusters(SA_abs_matched, clust_spec_pos)
+SA_abs_matched_clust = split(SA_abs_matched_clust[[1]], SA_abs_matched_clust[[1]]$Group)
+
+# Plot partial correlation distributions
+plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, group_vec = c('Control', 'Syn'))
+```
+No huge differences here, but some subtle disparities in the shape of the distribution. Let's write this to .csv files for analysis in python.
+
+```{r}
+write.csv(SA_abs_matched_clust$Control, file = paste0(savepath_data, 'spectral_clust/SA_abs_spec_sum_cntrl_matched.csv'), row.names = F)
+```
+

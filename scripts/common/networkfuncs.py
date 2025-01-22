@@ -128,7 +128,7 @@ def draw_graph_anatomical(graph, positions, colours):
     color = graph.new_vertex_property("vector<double>") # create new
     for i, vertex in enumerate(graph.vertices()): # for each vertex
         pos[vertex] = (positions.loc[i, 'x'], positions.loc[i, 'y']) # get x and y positions
-        color[vertex] = hex_to_rgb(colours[positions.loc[i, 'group']]) # set colour by group
+        color[vertex] = hex_to_rgb(colours[positions.loc[i, 'Region']]) # set colour by group
 
     # set edge colours:
     edge_color= graph.new_edge_property("vector<double>") # initialise new edge property to store edge colours
@@ -144,7 +144,7 @@ def draw_graph_anatomical(graph, positions, colours):
         pos=pos, # set vertex positions
         vertex_fill_color=color, # set vertex fill colours
         edge_color=graph.ep.color, # refer to edge colours
-        edge_pen_width=prop_to_size(graph.ep.weight, 0.1, 3, power = 2, log = False), # set edge widths based on weights
+        edge_pen_width=prop_to_size(graph.ep.weight, 0.1, 4, power = 3, log = False), # set edge widths based on weights
         eorder=graph.ep.weight, # set edge order (largest on top)
         vertex_color = 'black', # set vertex stroke colour
         vertex_size = 8, # set vertex size
