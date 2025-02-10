@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from graph_tool.all import *
 import matplotlib.cm as cm
 import scipy
+import itertools
 
 # Test function
 def test(a,b):
@@ -33,8 +34,11 @@ def partial_cor(data):
 
 # Function to convert given data to a list of two graphs
 # Takes a csv file with mixed data for two groups, one 'Control' and one experimental given by groupname
-def data_to_graphs(filename, groupname = False):
+def data_to_graphs(filename, groupname = False, log = False):
     data = pd.read_csv(filename)  # read data
+
+    if log:
+        data.iloc[:,7:] = np.log(data.iloc[:,7:])
 
     if groupname: # if segregating by group
         pcormats = [partial_cor(data[data['Group'] == 'Control'].iloc[:, 7:]), # generate partial correlations from data
@@ -147,13 +151,39 @@ def draw_graph_anatomical(graph, positions, colours):
         edge_pen_width=prop_to_size(graph.ep.weight, 0.1, 4, power = 3, log = False), # set edge widths based on weights
         eorder=graph.ep.weight, # set edge order (largest on top)
         vertex_color = 'black', # set vertex stroke colour
-        vertex_size = 8, # set vertex size
+        vertex_size = 10, # set vertex size
         output_size = (800,800) # set vertex colour
     )
+
+# Function to calculate Euclidean distance
+def euclidean_distance(x1, y1, x2, y2):
+    return np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+
+# Function to get euclidean distances from 2D positional data
+def get_dists(positions, name):
+    area_pairs = list(itertools.product(positions[name], repeat=2))  # get pairs of areas
+    distances = []  # initialise distances
+    for (area1, area2) in area_pairs:  # for each area in each pair
+        x1, y1 = positions[positions[name] == area1][['x', 'y']].values[
+            0]  # X and Y values for area 1
+        x2, y2 = positions[positions[name] == area2][['x', 'y']].values[
+            0]  # X and Y values for area 2
+        distance = euclidean_distance(x1, y1, x2, y2)  # euclidean distance of pair
+        distances.append({
+            'pair': f"{area1}-{area2}",  # create data
+            'area_1': area1,
+            'area_2': area2,
+            'distance': distance
+        })
+    distances = pd.DataFrame(distances)  # convert to dataframe
+    return(distances)
 
 # Function to merge correlation weights with physical distances and plot scatterplot, given correlation matrix and physical distances
 def weight_by_dist(cormat, dists):
     flatmat = cormat.reset_index().melt(id_vars='index', var_name='area_1',value_name='weight')  # convert correlation matrix to long form
+
+    dists['area_1'] = dists['area_1'].astype(str)
+    dists['area_2'] = dists['area_2'].astype(str)
 
     graph_dist = pd.merge(flatmat, dists, left_on=['index', 'area_1'], right_on=['area_2', 'area_1'], how='left')  # merge distance and weight data
     graph_dist['pair'] = graph_dist.apply(lambda row: tuple(sorted([row['index'], row['area_1']])), axis=1) # recreate 'pair' column by reordering areas
@@ -184,11 +214,12 @@ def SWP(cormat, dists, C_obs, L_obs):
         L = distances_sum / ((graph.num_vertices() - 1) * graph.num_vertices())
 
         return L
+
     # generate lattice graph #
 
     # sort values so shortest distances have highest weights
     distances_sort = dists.sort_values(by=['distance'], ascending=[True])[['area_1', 'area_2', 'distance']].reset_index(drop=True) # sort distances
-    lattice_weights =  dists['weight'].sort_values(ascending = False).reset_index(drop=True) # get sorted weights
+    lattice_weights = dists['weight'].sort_values(ascending = False).reset_index(drop=True) # get sorted weights
     distances_sort['weight'] = lattice_weights # add sorted weights to sorted distances
 
     # change distances object back to covariance matrix and fill with sorted weights
@@ -198,7 +229,7 @@ def SWP(cormat, dists, C_obs, L_obs):
         cormat_latt.at[row['area_1'], row['area_2']] = row['weight']
         cormat_latt.at[row['area_2'], row['area_1']] = row['weight']
 
-        cormat_latt.reindex(index=cormat[0].index, columns=cormat[0].columns) # reorder matrix to match original order
+        cormat_latt.reindex(index=cormat.index, columns=cormat.columns) # reorder matrix to match original order
 
     graph_latt = Graph(scipy.sparse.lil_matrix(cormat_latt), directed=False) # create lattice graph
     remove_self_loops(graph_latt) # remove self-loops
