@@ -17,7 +17,7 @@ def test(a,b):
 # Function to generate a matrix of absolute partial correlations given wide-form data
 # E.g. to get partial correlations of surface areas given parcel surface areas
 # requires pandas
-def partial_cor(data):
+def partial_cor(data, absolute = True):
     data_cov = data.cov().values # covariance values
     precision_matrix = np.linalg.inv(data_cov) # invert cov matrix to get precision matrix
     data_pcorr = np.zeros_like(precision_matrix) # initialise zero matrix
@@ -30,30 +30,52 @@ def partial_cor(data):
 
     data_pcorr = pd.DataFrame(data_pcorr, index=data.columns, columns=data.columns) # turn it into a pandas DataFrame
 
-    return (abs(data_pcorr)) # return the absolute partial correlations
+    if absolute:
+        data_pcorr = abs(data_pcorr)
+
+    return (data_pcorr) # return the absolute partial correlations
 
 # Function to convert given data to a list of two graphs
 # Takes a csv file with mixed data for two groups, one 'Control' and one experimental given by groupname
-def data_to_graphs(filename, groupname = False, log = False):
+def data_to_graphs(filename, groupname = False, log = False, split_sign = False):
     data = pd.read_csv(filename)  # read data
 
     if log:
         data.iloc[:,7:] = np.log(data.iloc[:,7:])
 
     if groupname: # if segregating by group
-        pcormats = [partial_cor(data[data['Group'] == 'Control'].iloc[:, 7:]), # generate partial correlations from data
-                    partial_cor(data[data['Group'] == groupname].iloc[:, 7:])]  # and put into list
-
-        graphs = []  # initialise list of graphs
-        for pcormat in pcormats:  # for each partial correlation matrix
-            graphs.append(Graph(scipy.sparse.lil_matrix(pcormat), directed=False))  # generate graphs
-            remove_self_loops(graphs[-1])  # remove self-correlations
+        data = [data[data['Group'] == 'Control'],
+                data[data['Group'] == groupname]]
 
     else: # if not segregating by group
-        pcormat = partial_cor(data.iloc[:,7:]) # generate one partial correlation matrix
+        data = [data] # put into list
 
-        graphs = Graph(scipy.sparse.lil_matrix(pcormat), directed=False)
-        remove_self_loops(graphs)
+    pcormats = [] # initialise partial correlation matrices
+
+    if split_sign: # if splitting positive and negative
+        for datum in data:
+            pcormat = partial_cor(datum.iloc[:,7:], absolute = False)
+            pcormats_split = [pcormat.clip(lower=0), pcormat.clip(upper=0)]
+            pcormats.append(pcormats_split)
+        graphs = []
+        for i in range(len(pcormats)):
+            split_graphs = [Graph(scipy.sparse.lil_matrix(pcormats[i][0]), directed = False), # positive split
+                            Graph(scipy.sparse.lil_matrix(abs(pcormats[i][1])), directed = False)] # negative split - make positive for edge weights
+            remove_self_loops(split_graphs[0])
+            remove_self_loops(split_graphs[1])
+            graphs.append(split_graphs)
+
+    else: # if not splitting positive and negative
+        for datum in data:
+            pcormat = partial_cor(datum.iloc[:,7:], absolute = True)
+            pcormats.append(pcormat)
+        graphs = []
+        for i in range(len(pcormats)):
+            graphs.append(Graph(scipy.sparse.lil_matrix(pcormats[i]), directed = False))
+            remove_self_loops(graphs[i])
+
+    if len(graphs) == 1:
+        graphs = graphs[0] # so that we don't get a list if only one graph
 
     return graphs
 
