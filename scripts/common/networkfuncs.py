@@ -14,10 +14,12 @@ def test(a,b):
     c = a + b
     return c
 
-# Function to generate a matrix of absolute partial correlations given wide-form data
-# E.g. to get partial correlations of surface areas given parcel surface areas
-# requires pandas
 def partial_cor(data, absolute = True):
+    """"
+    Calculate partial correlation matrix
+    :param data: a pandas DataFrame where columns are variables and rows are subjects
+    :param absolute: if True then absolute correlation matrix is returned
+    """
     data_cov = data.cov().values # covariance values
     precision_matrix = np.linalg.inv(data_cov) # invert cov matrix to get precision matrix
     data_pcorr = np.zeros_like(precision_matrix) # initialise zero matrix
@@ -35,9 +37,15 @@ def partial_cor(data, absolute = True):
 
     return (data_pcorr) # return the absolute partial correlations
 
-# Function to convert given data to a list of two graphs
-# Takes a csv file with mixed data for two groups, one 'Control' and one experimental given by groupname
 def data_to_graphs(filename, groupname = False, log = False, split_sign = False):
+    """
+    Convert data file into a graph
+    :param filename: name of file where data is stored
+    :param groupname: if True then data is split by the group name and 'Control'
+    :param log: if True then data is log-transformed
+    :param split_sign: if True then partial correlation matrix is split into positive and negative
+    """
+
     data = pd.read_csv(filename)  # read data
 
     if log:
@@ -79,9 +87,12 @@ def data_to_graphs(filename, groupname = False, log = False, split_sign = False)
 
     return graphs
 
-# Function to plot distributions of strengths
-# Takes a list of just two graphs and will plot the distributions for each graph
 def plot_strengths(graphs):
+    """
+    Plot distributions of node strengths of a list of graphs
+    :param graphs: a list of graph-tool graph objects
+    :return: a matplotlib figure
+    """
     strengths = []
     for graph in graphs: # for each graph
         weight = graph.edge_properties["weight"] # get edge weights
@@ -101,10 +112,13 @@ def plot_strengths(graphs):
     plt.title("Node Strength Distributions") # set the title
     plt.show() # show plot
 
-# Function to calculate and agglomerate network metrics
-# currently includes: clustering, efficiency, characteristic path length, mean edge and vertex betweeness; also a histogram of shortest distances
-# requires pandas, graph-tool, numpy
 def measure_net(graph):
+    """
+    Calculate basic network metrics for a graph
+    :param graph: a graph-tool graph object
+    :return: a tuple of a DataFrame of network metrics and a histogram of shortest distances
+    """
+
     net_metrics = pd.DataFrame() # initialise dataframe to store results
 
     clustering = global_clustering(graph, weight=graph.ep.weight)[0]  # global weighted clustering
@@ -144,7 +158,18 @@ def measure_net(graph):
 # nodes coloured by according to group membership, given group numbers (in x and y data)
 # edges brighter, thicker and closer to top of layer with increasing weight
 # requires graph-tool, matplotlib.cm
-def draw_graph_anatomical(graph, positions, colours):
+def draw_graph_anatomical(graph, positions, colours, absolute_edges, output_file):
+    """
+    Draw a graph with an anatomical layout
+    Vertices coloured by group membership; stronger edges are brighter, thicker and closer to top of layer
+    requires: graph-tool, matplotlib.cm
+    :param graph: a graph-tool graph object
+    :param positions: a pandas DataFrame with columns 'x' and 'y'
+    :param colours: a dictionary with numerical keys corresponding to hex code colours
+    :param absolute_edges: if True, scale edge widths but keeping absolute differences; otherwise use min-max scaling
+    :param output_file: where to save the figure
+    :return: a figure
+    """
     def hex_to_rgb(hex_color): # helper function to convert hex colour to RGB tuple
         hex_color = hex_color.lstrip('#')
         return tuple(int(hex_color[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
@@ -160,29 +185,50 @@ def draw_graph_anatomical(graph, positions, colours):
     edge_color= graph.new_edge_property("vector<double>") # initialise new edge property to store edge colours
     for e in graph.edges(): # for each edge
         weight_val = graph.ep.weight[e] # acquire edge weight
-        rgba = list(cm.viridis(weight_val)) # get colour from chosen matplotlib colourmap
+        if 'pos' in output_file:
+           colourmap = cm.Reds
+        elif 'neg' in output_file:
+            colourmap = cm.Blues
+        else:
+            colourmap = cm.viridis
+        rgba = list(colourmap(weight_val)) # get colour from chosen matplotlib colourmap
         rgba[3] = (weight_val * 2) # set alpha values, scaled
         edge_color[e] = rgba # set edge colour
     graph.ep["color"] = edge_color # set edge colours as edge property
+
+    # set edge widths
+    if absolute_edges:
+        # scaled absolute values
+        edge_width = graph.new_edge_property("double")
+        edge_width.a = (graph.ep.weight.a**3)*20
+
+    else:
+        # min-max scaling
+        edge_width = prop_to_size(graph, graph.ep.weight, mi = 0.1, ma = 4, power = 3, log = False)
 
     graph_draw( # draw the graph
         graph,
         pos=pos, # set vertex positions
         vertex_fill_color=color, # set vertex fill colours
         edge_color=graph.ep.color, # refer to edge colours
-        edge_pen_width=prop_to_size(graph.ep.weight, 0.1, 4, power = 3, log = False), # set edge widths based on weights
+        edge_pen_width=edge_width,
         eorder=graph.ep.weight, # set edge order (largest on top)
         vertex_color = 'black', # set vertex stroke colour
         vertex_size = 10, # set vertex size
-        output_size = (800,800) # set vertex colour
+        output_size = (800,800), # set vertex colour
+        output = output_file
     )
 
-# Function to calculate Euclidean distance
 def euclidean_distance(x1, y1, x2, y2):
     return np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
 
-# Function to get euclidean distances from 2D positional data
 def get_dists(positions, name):
+    """
+    Get 2D physical distances between all vertices
+    :param positions: a pandas DataFrame with columns 'x' and 'y' and a column of vertex names
+    :param name: a string giving the vertex type name
+    :return: a pandas DataFrame with distances between all vertices
+    """
     area_pairs = list(itertools.product(positions[name], repeat=2))  # get pairs of areas
     distances = []  # initialise distances
     for (area1, area2) in area_pairs:  # for each area in each pair
@@ -200,8 +246,13 @@ def get_dists(positions, name):
     distances = pd.DataFrame(distances)  # convert to dataframe
     return(distances)
 
-# Function to merge correlation weights with physical distances and plot scatterplot, given correlation matrix and physical distances
 def weight_by_dist(cormat, dists):
+    """
+    Merge edge weights with their physical distances
+    :param cormat: a pandas DataFrame of vertex correlations
+    :param dists: a pandas DataFrame with distances between all vertices
+    :return: a pandas DataFrame of weight-distance combinations, and a scatterplot
+    """
     flatmat = cormat.reset_index().melt(id_vars='index', var_name='area_1',value_name='weight')  # convert correlation matrix to long form
 
     dists['area_1'] = dists['area_1'].astype(str)
@@ -222,6 +273,15 @@ def weight_by_dist(cormat, dists):
 # Function to calculate SWP and delta for a graph, given the correlation matrix and distances, and observed clustering and path length of graph in question
 # creates a distance-based lattice graph and a single random rewire for the null models
 def SWP(cormat, dists, C_obs, L_obs):
+    """
+    Calculate small-world propensity and delta for a graph using a distance-based lattice and single random rewire as null models
+    :param cormat: a pandas DataFrame of vertex correlations
+    :param dists: a pandas DataFrame with distances between all vertices
+    :param C_obs: the observed clustering coefficient for the graph corresponding to cormat
+    :param L_obs: the observed path length for the graph corresponding to cormat
+    :return: tuple: SWP, delta
+    """
+
     def calculate_path_length(graph): # helper function to get characteristic path length
         weight_inv = graph.new_edge_property("double")  # create new edge property for inverted weights
         for e in graph.edges():
@@ -246,7 +306,7 @@ def SWP(cormat, dists, C_obs, L_obs):
 
     # change distances object back to covariance matrix and fill with sorted weights
     areas = pd.unique(dists[['area_1', 'area_2']].values.ravel('K'))
-    cormat_latt = pd.DataFrame(index=areas, columns=areas).fillna(1)
+    cormat_latt = pd.DataFrame(index=areas, columns=areas, dtype=float).fillna(1)
     for _, row in distances_sort.iterrows():
         cormat_latt.at[row['area_1'], row['area_2']] = row['weight']
         cormat_latt.at[row['area_2'], row['area_1']] = row['weight']
@@ -295,17 +355,12 @@ def SWP(cormat, dists, C_obs, L_obs):
 
     return SWP, delta
 
-# Function to calculate Hedge's g
 def hedges_g(data, population_mean):
     """
     Calculate Hedges' g for a one-sample test.
-
-    Parameters:
-        data (array-like): The sample data.
-        population_mean (float): The hypothesized population mean.
-
-    Returns:
-        float: Hedges' g.
+    :param: data (array-like): The sample data.
+    :param: population_mean (float): The hypothesized population mean.
+    :return: float: Hedges' g.
     """
     # sample statistics
     n = len(data)
@@ -321,3 +376,148 @@ def hedges_g(data, population_mean):
     # get Hedges' g
     hedges_g = cohen_d * correction_factor
     return hedges_g
+
+def draw_graph_betweenclust(graph, positions, absolute_edges, output_file):
+    """
+    Draw a graph where vertex size and colour scale with betweenness and local clustering
+    :param graph: a graph-tool graph object
+    :param positions: a pandas DataFrame with columns 'x' and 'y'
+    :param absolute_edges: if True, scale edge widths but keeping absolute differences; otherwise use min-max scaling
+    :param output_file: where to save the figure
+    :return: a graph figure
+    """
+    # get inverted weights
+    weight_inv = graph.new_edge_property("double") # create new edge property for inverted weights
+    for e in graph.edges():
+        weight_inv[e] = 1.0 / graph.ep.weight[e] # get inverted weights
+    graph.ep['weight_inv'] = weight_inv
+
+    # calculate local clustering coefficients
+    clusts = local_clustering(graph, weight=graph.ep.weight).a
+    clusts = clusts**7 * 200000 # scale for visualisation - try to get one white in syn, one black in control
+    colors = cm.inferno(clusts)[:, :3]
+    vertex_color = graph.new_vertex_property("vector<double>")
+    vertex_color.set_2d_array(colors.T)
+
+    # calculate betweennesss
+    vb, _ = betweenness(graph, weight = graph.ep.weight_inv)
+    vb_vals = vb.a
+    vb_vals = vb_vals * 200 + 12 # scale for visualisation
+    vertex_size = graph.new_vertex_property("double")
+    vertex_size.a = vb_vals
+
+    # set vertex positions
+    pos = graph.new_vertex_property("vector<double>")
+    for i, vertex in enumerate(graph.vertices()):
+        pos[vertex] = (positions.loc[i, 'x'], positions.loc[i, 'y'])
+
+    # set edge colours
+    edge_color= graph.new_edge_property("vector<double>") # initialise new edge property to store edge colours
+    for e in graph.edges():
+        weight_val = graph.ep.weight[e] # acquire edge weight
+        rgba = list(cm.viridis(weight_val)) # get colour from chosen matplotlib colourmap
+        rgba[3] = (weight_val * 2) # set alpha values, scaled
+        edge_color[e] = rgba
+    graph.ep["color"] = edge_color # set edge colours
+
+    # set edge widths
+    if absolute_edges:
+        # scaled absolute values
+        edge_width = graph.new_edge_property("double")
+        edge_width.a = (graph.ep.weight.a**3)*20
+    else:
+        # min-max scaling
+        edge_width = prop_to_size(graph, graph.ep.weight, mi = 0.1, ma = 4, power = 3, log = False)
+
+    # draw graphs
+    graph_draw(
+        graph,
+        pos=pos, # set vertex positions
+        vertex_fill_color = vertex_color,
+        edge_color = graph.ep.color, # refer to edge colours
+        edge_pen_width = edge_width,
+        eorder = graph.ep.weight, # set edge order (largest on top)
+        vertex_color = 'black',
+        vertex_size = vertex_size,
+        output_size = (800,800),
+        output = output_file
+    )
+
+def draw_graph_difference(graphs, positions, absolute_edges, output_file):
+    """
+    Draw a graph from two input graphs such that the edges represent the difference in correlation, vertex colour represents difference in local clustering and vertex size represents the difference in betweenness
+    :param graphs: a list of graph-tool graph objects
+    :param positions: a pandas DataFrame with columns 'x' and 'y'
+    :param absolute_edges: if True, scale edge widths but keeping absolute differences; otherwise use min-max scaling
+    :param output_file: where to save the figure
+    :return: a graph figure
+    """
+    for graph in graphs:
+        # get inverted weights
+        weight_inv = graph.new_edge_property("double") # create new edge property for inverted weights
+        for e in graph.edges():
+            weight_inv[e] = 1.0 / graph.ep.weight[e] # get inverted weights
+        graph.ep['weight_inv'] = weight_inv
+
+        # calculate local clustering coefficients
+        graph.vp['local_clustering'] = local_clustering(graph, weight=graph.ep.weight)
+        #calculate betweenness
+        vb, eb = betweenness(graph, weight = graph.ep.weight_inv)
+        graph.vp['v_between'] = vb
+
+    # get difference values: absolute difference of synesthete - control
+    edge_diffs = abs(graphs[1].ep.weight.a - graphs[0].ep.weight.a)
+    clust_diffs = abs(graphs[1].vp.local_clustering.a - graphs[0].vp.local_clustering.a)
+    between_diffs = abs(graphs[1].vp.v_between.a - graphs[0].vp.v_between.a)
+
+    # create new graph and set properties
+    graph = graphs[0].copy()
+
+    # set weights
+    graph.ep.weight.a = edge_diffs
+
+    # set vertex colours
+    colors = cm.inferno(np.log1p(clust_diffs)*20)[:, :3] # log-transform differences
+    vertex_color = graph.new_vertex_property("vector<double>")
+    vertex_color.set_2d_array(colors.T)
+
+    # set vertex sizes
+    vertex_size = graph.new_vertex_property("double")
+    vertex_size.a = np.log1p(between_diffs)*210 + 8
+
+    # set vertex positions
+    pos = graph.new_vertex_property("vector<double>")
+    for i, vertex in enumerate(graph.vertices()):
+        pos[vertex] = (positions.loc[i, 'x'], positions.loc[i, 'y'])
+
+    # set edge colours
+    edge_color= graph.new_edge_property("vector<double>") # initialise new edge property to store edge colours
+    for e in graph.edges():
+        weight_val = graph.ep.weight[e] # acquire edge weight
+        rgba = list(cm.viridis(weight_val)) # get colour from chosen matplotlib colourmap
+        rgba[3] = (weight_val * 2) # set alpha values
+        edge_color[e] = rgba
+    graph.ep["color"] = edge_color # set edge colours
+
+    # set edge widths
+    if absolute_edges:
+        # scaled absolute values
+        edge_width = graph.new_edge_property("double")
+        edge_width.a = (graph.ep.weight.a**3)*20
+    else:
+        # min-max scaling
+        edge_width = prop_to_size(graph, graph.ep.weight, mi = 0.1, ma = 4, power = 3, log = False)
+
+    # draw graph
+    graph_draw(
+        graph,
+        pos=pos, # set vertex positions
+        vertex_fill_color = vertex_color,
+        edge_color = graph.ep.color, # refer to edge colours
+        edge_pen_width = prop_to_size(graph.ep.weight, 0.01, 4, power = 4, log = False), # set edge widths based on weights
+        eorder = graph.ep.weight, # set edge order (largest on top)
+        vertex_color = 'black',
+        vertex_size = vertex_size,
+        output_size = (800,800),
+        output=output_file
+    )
