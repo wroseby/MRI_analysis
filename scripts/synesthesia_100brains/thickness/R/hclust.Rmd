@@ -1,0 +1,565 @@
+---
+title: "Hierarchical clustering of HCP parcels"
+output:
+  pdf_document: default
+
+params:
+  seed: 91939
+---
+## Absolute surface area
+**Prerequisites:** surface area data for 360 HCP parcels in .csv format with metadata in columns 1 through 8.  
+
+This is a notebook to perform hierarchical clustering of partial correlations between HCP parcels. The purpose of this approach is to reduce the number of nodes to below 100 so we can use partial correlations to form networks for a synesthete sample of n = 102 participants. In general, clustering will be performed on partial correlations of left-right averaged data from the control sample of n = 650 participants. However, we will run diagnostics on the clusters, including examining consistency between multiple resamples of n = 300 controls. Partial correlations will be clustered using Euclidean distance as a measure of distance between parcels:
+
+$$ d(p,q) =  \sqrt{\sum_{i=1}^{n}{(q_i-p_i)^2}}$$
+Once an optimal clustering is found via diagnostic measures, we will summarise the results within clusters before exporting the results for network analysis with python.
+
+```{r load_packages, include=F}
+# Load packages #
+
+library(ppcor)
+library(dendextend)
+library(dplyr)
+library(viridis)
+library(ggplot2)
+library(reshape2)
+library(mclust)
+library(cluster)
+library(clValid)
+library(MatchIt)
+library(gridExtra)
+library(copula)
+library(effsize)
+library(MASS)
+library(MVN)
+library(effectsize)
+library(rvinecopulib)
+```
+
+```{r functions, include=F}
+source("D:/Documents/Academia/projects/ward_lab/MRI_analysis/scripts/common/R_custom_functions.R") 
+```
+
+```{r load_data, include=F}
+# Read in data and set paths for saving #
+datapath =  'D:/Documents/Academia/projects/ward_lab/MRI_analysis/datasets/synesthesia_100brains/'
+savepath_data = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/shared/synesthesia_100brains/thickness/'
+savepath_outputs = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/outputs/synesthesia_100brains/thickness/R/'
+thickness = read.csv(paste0(datapath, '/thickness/biomarker_S2_harm.csv'), row.names = 1)
+parcel_positions = read.csv(paste0(datapath, '/common/parcel_positions_flat.csv'))
+thickness_lr = lr_average(thickness)
+```
+
+# Group differences in thickness
+
+We want to be aware of any substantial differences between the groups in terms of their average thickness. 
+
+Let's plot the mean cortical thickness across the whole cortex for each participant, separated by group:
+
+```{r group_thickness, warning=F, message=F}
+# Calculate mean thickness
+thickness_tot = thickness %>%
+  group_by(ID) %>%
+  summarise(mean = rowMeans(across(c(8, 366))),
+            Group = unique(Group))
+
+# Plot results
+ggplot(thickness_tot, aes(x = Group, y = mean))+
+  geom_boxplot(aes(fill = Group), colour = 'black', outliers = F, alpha = 0.5)+
+  geom_point(size = 1, shape = 21, position = position_jitter(0.2))+
+  scale_fill_manual(values = c('red', 'blue'))+
+  labs(y = 'Mean cortical thickness (mm)')
+
+```
+
+The average cortical thickness seems to be notably lower on average in synesthetes. Now, let's create a series of linear models to check which areas are different between the groups:
+
+```{r linear_model, warning=F, message=F}
+# Create new dataframe for linear model residuals for each parcel
+thickness_lm = thickness[, c('ID', 'Age', 'Sex', 'Group', 'Subgroup', 'Scan', 'Partition')]  
+
+# Fit model for each area and store result
+model_summaries = list()
+for (region in colnames(thickness[, 8:ncol(thickness)])) {  
+  model = lm(thickness[[region]] ~ Group, data = thickness)
+  model_summaries[[region]] = summary(model)
+  thickness_lm[[paste0(region)]] = residuals(model)  
+}
+
+# Check for any significant differences
+lm_pvalues = sapply(model_summaries, FUN = function(list){
+  list[["coefficients"]][2,4]
+})
+
+lm_coefs = sapply(model_summaries, FUN = function(list){
+  list[["coefficients"]][2,1]
+})
+
+# Print significant coefficients and their proportion
+print(lm_coefs[lm_pvalues < .05])
+print(length(lm_pvalues[lm_pvalues < .05]) / length(lm_pvalues))
+
+#thickness = thickness_lm # replace data - uncomment if desired
+#thickness_lr = lr_average(thickness) # replace data
+
+```
+
+29.4% of parcels show some sort of significant difference in the synesthete group compared to controls. In most cases, thickness is lower in synesthetes, with some exceptions. 
+
+Note, that because we are using pearson (partial) correlation coefficients, absolute differences in any measurements should not affect our characterisation of the correlation structure (although it could affect interpretations of what it means). However, in testing, using linear model residuals did not affect the results of further analysis, suggesting that any differences are not simply due to group-average differences in thickness.
+
+# Ward's clustering
+
+For hierarchical clustering, we will use Ward's method, since it is known to form spherical clusters and well accommodate outliers. This method forms clusters by minimising the within cluster variance.
+
+To obtain a specific clustering here, we have to choose a value which specifies where the clustering will be cut. Nodes separated below this value will be in the same cluster, while nodes separated above this value will be in different clusters. We will iterate across some cutoff values which are known (via prior testing) to generate less than 100 clusters but more than 1 cluster. We iterate in steps of 0.01 which will produce a small change in the cluster number in most cases.
+
+Additionally, because the process of finding the optimal cluster depends to some degree on random subsampling of control data, we will iterate the process over 10 random seeds to see if there is a stable optimal cluster number. The code below will perform this iteration to find the optimal cutoff value and the number of clusters associated with it.
+
+
+```{r ward_clustering_optimisation, message=F, warning=F, cache=T}
+# Set random seeds
+seeds = c(674345, 811071, 276503, 411732, 475378, 
+          690070, 425943, 729736, 621889, 660812)
+# Set cutoff values to test
+cut_values = seq(from = 1.58, to = 2.50, by = 0.01)
+# Initialise results
+clust_wrd_clustns = vector()
+clust_wrd_cuts = vector()
+# Iterate over the 10 seeds
+for (i in 1:10){
+  clust_wrd_optimum = optimal_cluster(data = thickness, 
+                clust_method = 'ward.D', 
+                cut_values = cut_values, 
+                seed = seeds[i])
+  clust_wrd_clustns[i] = clust_wrd_optimum[[3]]
+  clust_wrd_cuts[i] = clust_wrd_optimum[[1]]
+}
+clustn = Mode(clust_wrd_clustns)
+cut = Mode(clust_wrd_cuts)
+print(paste0('Optimal cluster numbers: ', clust_wrd_clustns))
+print(paste0('Consensus cluster number = ', clustn))
+```
+
+It seems here the optimal number of clusters is `r print(clustn)`. However, it's worth noting that the optimal number of clusters appears to vary quite substantially with the different seeds, from 49 up to 83. Therefore, there may not be a stable solution to the problem of clustering parcels by cortical thickness.
+
+Let's reform the clustering with the suggested clusters, and plot the dendrogram and the cluster locations on the 2D flattened cortical sheet:
+
+```{r cluster_locations}
+# Form optimal clusters and plot dendrogram
+clust_wrd = hclust.plot(thickness_lr, group = 'Control', clust_method = 'ward.D', 
+                        cut = cut, clustn = clustn, plot_tree = T)
+
+# Plot cluster anatomical positions
+clust_wrd_pos = merge(parcel_positions, clust_wrd[[1]]) # merge with positions
+clust_wrd_pos$cluster = factor(clust_wrd_pos$cluster) # factor clusters
+ggplot(data = clust_wrd_pos, aes(x = x, y = max(y) - y, fill = cluster))+
+  geom_point(size = 0.8, shape = 21, stroke = 0.5)+
+  geom_text(aes(
+    label = gsub(x = cluster, pattern = 'cluster ', replacement = '')), 
+    size = 2, vjust = -0.6)+
+  scale_fill_viridis_d(option = "C")+
+  labs(x = 'x', y = 'y')+
+  theme(legend.position = 'none',
+        axis.text = element_blank())
+
+```
+
+Unlike with surface area, the clusters here don't follow any clear arrangement, with members of the same cluster being dispersed in areas across the cortex. This finding further suggests that the clustering of thickness correlations may not reflect a stable pattern of cortical structure. 
+
+Therefore, we will read in the clusters generated previously by hierarchical clustering of surface area data, to see if thickness also shows variations within this set of clusters. In this analysis of cortical thickness however, we will find the mean thickness value within clusters, rather than the sum as we did for surface area.
+
+```{r load_SA_clusters}
+# Read in the clustering
+clust_wrd_pos = read.csv('D:/Documents/Academia/projects/ward_lab/MRI_analysis/shared/synesthesia_100brains/surface_area/hclust/clust_wrd_pos.csv')
+clust_wrd_pos$cluster = factor(clust_wrd_pos$cluster) # factor clusters
+```
+
+## Matched controls and synesthetes
+
+We know from the analysis of surface area that matching controls by age and sex is important to avoid mis-matched comparisons. Let's use the same procedure to match 102 controls with the synesthetes, generate the partial correlations for the SA-derived clusters and compare the groups:
+
+```{r match_groups_noscan, message=F, warning=F}
+# Match controls and synesthetes by sex and age
+thickness$Group = factor(thickness$Group, levels = c('Control', 'Syn'))
+matched = matchit(Group ~ Sex + Age, data = thickness, 
+                  method = "optimal", ratio = 1)
+thickness_matched = match.data(matched)
+
+# Remove additional columns, lr average, and summarise within clusters
+thickness_matched = thickness_matched[,-c(368:370)]
+thickness_matched = lr_average(thickness_matched)
+thickness_matched_clust = summarise_clusters(thickness_matched, clust_wrd_pos)
+thickness_matched_clust = split(thickness_matched_clust[[2]], 
+                             thickness_matched_clust[[2]]$Group)
+
+# Plot partial correlation distributions
+plot_pcors(data_list = thickness_matched_clust, nclust = nclust, 
+           group_vec = c('Control', 'Syn'))
+
+# Write matched controls to csv
+write.csv(thickness_matched_clust$Control, 
+          file = paste0(savepath_data, 
+                        'hclust/thickness_wrd_sum_cntrl_matched.csv'), 
+          row.names = F)
+write.csv(thickness_matched_clust$Syn, 
+          file = paste0(savepath_data, 
+                        'hclust/thickness_wrd_sum_syn.csv'), 
+          row.names = F)
+
+```
+
+We see a similar distribution of correlations to what we have previously observed in surface area. Analysis with python shows a very similar pattern of group differences in basic network metrics to what we observed with surface area.
+
+## Multivariate distribution
+
+As with surface area, we want to check the distribution of our measurement data, both for the raw data and the cluster-summarised data.
+
+```{r lr_MVN_tests}
+# MVN tests for complete control data, prior to clustering
+MVN_test(thickness_lr[thickness_lr$Group == 'Control',8:ncol(thickness_lr)])
+```
+
+A similar pattern to surface area: while some parcels are possibly not very normally distributed, it appears most are.
+
+Let's now check the matched data, after clustering, to ensure our partial correlations appropriately describe the cluster dependence structure in each group:
+
+```{r cluster_MVN_tests}
+MVN_test(thickness_matched_clust$Control[,8:ncol(thickness_matched_clust$Control)])
+MVN_test(thickness_matched_clust$Syn[,8:ncol(thickness_matched_clust$Syn)])
+```
+
+Also a similar situation to the surface area data. Some departures from normality, but we can probably assume MVN for the cluster-averaged data.
+
+```{r cluster_univariate_normality}
+table(mvn(thickness_matched_clust$Control[,8:ncol(thickness_matched_clust$Control)])
+      [['univariateNormality']]$Normality)
+```
+
+Again, we see that most clusters are normally distributed.
+
+Therefore, in making the MVN assumption, we can be fairly sure that partial correlations accurately describe conditional dependence structure of our data. Furthermore, this suggests we can use a gaussian copula to accurately model the correlation structure.
+
+## Copula sampling
+
+Given these results, let's generate elliptical vine copulae based off the cluster-summarised matched log-transformed data, take some samples, and export them to python for analysis:
+
+```{r copula_sampling, message = F, warning = F}
+# Generate copula samples
+set.seed(params$seed)
+thickness_matched_clust_cntrl_copula = 
+  sampleCopula(data = thickness_matched_clust$Control, 
+                                                 log = F, 
+                                                 copulatype = c('vine'), 
+                                                 invert = c('empirical'),
+                                                 n = 102, 
+                                                 n_samp = 10)
+set.seed(params$seed)
+thickness_matched_clust_syn_copula = 
+  sampleCopula(data = thickness_matched_clust$Syn, 
+                                                 log = F, 
+                                                 copulatype = c('vine'), 
+                                                 invert = c('empirical'),
+                                                 n = 102, 
+                                                 n_samp = 10)
+# Export to python
+for (i in 1:10){
+  write.csv(thickness_matched_clust_cntrl_copula[[i]][["copula_samples"]], 
+            paste0(savepath_data, 
+                   'hclust/thickness_matched_clust_cntrl_copula_', i, '.csv'), 
+            row.names = F)
+  write.csv(thickness_matched_clust_syn_copula[[i]][["copula_samples"]], 
+            paste0(savepath_data, 
+                   'hclust/thickness_matched_clust_syn_copula_', i, '.csv'), 
+            row.names = F)
+}
+
+copula_MAE_cntrl = mean(sapply(thickness_matched_clust_cntrl_copula,
+                          FUN = function(list){list[["cor_error"]]}))
+copula_MAE_syn = mean(sapply(thickness_matched_clust_syn_copula,
+                          FUN = function(list){list[["cor_error"]]}))                        
+
+print(c(copula_MAE_cntrl, copula_MAE_syn))
+```
+
+Note that the mean absolute error for the sampled correlations compared to empirical correlations is quite low for both groups, at around .06. 
+
+Having run the network analysis on these samples in python, let's import the network metrics and compare them across groups.
+
+```{r copula_metrics}
+# Import metrics
+net_metrics = read.csv(paste0(
+  savepath_data, 'hclust/clust_wrd_matched_copula_net_metrics.csv'))
+net_metrics = melt(net_metrics, id.vars = 'Group')
+net_metrics$Group = factor(net_metrics$Group, levels = c('Control', 'Syn'))
+
+# Run statistics
+run_tests = function(data) {
+  t_test_result = t.test(value ~ Group, data = data)
+  effect_size = cohen.d(value ~ Group, data = data, hedges = T)$estimate
+  shapiro_control = shapiro.test(data$value[data$Group == "Control"])
+  shapiro_syn = shapiro.test(data$value[data$Group == "Syn"])
+  tibble(
+    mean_control = mean(data$value[data$Group == "Control"]),
+    mean_syn = mean(data$value[data$Group == "Syn"]),
+    shapiro_control = shapiro_control$p.value,
+    shapiro_syn = shapiro_syn$p.value,
+    effect_size = effect_size,
+    p_value = t_test_result$p.value
+  )
+}
+net_metrics_summary = net_metrics %>%
+  group_by(variable) %>%
+  group_modify(~ run_tests(.x)) %>%
+  ungroup()
+
+print(net_metrics_summary)
+
+# Plot results
+ggplot(data = net_metrics, aes(x = Group, y = value, 
+                               fill = Group, colour = Group))+
+  stat_summary(fun = mean, geom = 'col', 
+               alpha = 0.5, width = 0.8, colour = 'black')+
+  geom_point(shape = 21, stroke = 1, size = 2, fill = NA, show.legend = F, 
+             position = position_jitter(0.1))+
+  scale_fill_manual(values = c('blue', 'red'))+
+  scale_colour_manual(values = c('blue', 'red'))+
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.y = element_blank(),
+    legend.position = 'top')+
+  guides(fill = guide_legend(override.aes = list(alpha = 1)))+
+  facet_wrap(~variable, scales = 'free_y', 
+             labeller = as_labeller(c(clustering = 'Clustering',
+                                      efficiency = 'Efficiency',
+                                      L_obs = 'Path length',
+                                      mean_eb = 'Mean edge betweenness',
+                                      mean_vb = 'Mean vertex betweenness')))
+```
+
+Here we see no differences between the groups on any of the network metrics.
+
+However, it may still be useful to complete the rest of the analysis using the matched sample data. 
+
+# Analysis of similarity-distance relationship
+
+## Weight by distance relationship
+
+To examine the possible spatial differences between the groups, we can visualise the networks. We have drawn the graphs in python, so let's import them here:
+
+```{r matched_control_network, fig.cap = 'Partial correlation network of 62 SA clusters in controls'}
+# Import network visualisations
+python_imports = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/outputs/synesthesia_100brains/thickness/python/'
+knitr::include_graphics(paste0(python_imports, 'thickness_matched_clust_cntrl_net.png'))
+```
+
+```{r matched_syn_network, fig.cap = 'Partial correlation network of 62 SA clusters in synesthetes'}
+knitr::include_graphics(paste0(python_imports, 'thickness_matched_clust_syn_net.png'))
+```
+
+In python, we have also calculated the 2D distance between every node and merged these with the edge weights (i.e. partial correlation strengths). Let's import that data and visualise it for the two groups:
+
+```{r weight_by_dist, fig.cap = 'Distance-correlation relationships for controls and synesthetes', warning=F, message=F}
+# Import and combine 2D distance data
+dists_cntrl = read.csv(paste0(savepath_data,
+                              'hclust/clust_wrd_matched_cntrl_dists.csv'))
+dists_syn = read.csv(paste0(savepath_data,
+                            'hclust/clust_wrd_matched_syn_dists.csv'))
+dists = rbind(dists_cntrl, dists_syn)
+dists$Group = rep(c('Control', 'Syn'), each = nrow(dists)/2)
+
+ggplot(data = dists, aes(x = distance, y = weight, colour = Group))+
+  geom_smooth(lwd = 1.1)+
+  scale_color_manual(values = c('blue', 'red'))+
+  labs(x = 'Two-dimensional distance (pixels)', # change to mm at some point
+       y = 'Absolute partial correlation')
+```
+
+A similar pattern to what we observed with surface area. In controls, there are strong correlations at very short distances that rapidly decreases. In synesthetes, the relationship is flatter, with the stronger correlations spread out over more distances. 
+
+## Small-worldness
+
+With the 2D distances, we will also calculate SWP as a measure of small-worldness:
+
+```{r SWP, fig.cap = 'SWP and delta values in controls and synesthetes'}
+# Import SWP results
+SWP = read.csv(paste0(savepath_data,
+                              'hclust/clust_wrd_matched_SWP.csv'))
+SWP = melt(SWP, id.vars = 'Group')
+
+# Plot SWP and delta
+ggplot(data = SWP, aes(x = Group, y = value, fill = Group))+
+  geom_col(position = position_dodge(), color = 'black', alpha = 0.5)+
+  scale_fill_manual(values = c('blue', 'red'))+
+  labs(x = '',
+       y = '')+
+    facet_wrap(~variable, scales = 'free_y')
+```
+
+SWP is actually quite low in the control network at around 0.35, although it is even lower for synesthetes at around 0.15. Both networks seem to be much more like their random null models than their lattice null models. This indicates that the distance based lattice null network (where the largest correlations are at the shortest distances) does not capture much about the empirical network. This suggests that either 1) cortical thickness only has a weak relationship with distance (at the group level) or 2) our method of parcellation / clustering does not capture an underlying relationship between cortical thickness and distance. 
+
+# Analysis of local vertex properties
+
+So far, we have shown that control and synesthete networks differ in several global properties. However, it would be interesting to see if this is a global trend or if specific clusters contribute to these patterns.
+
+In python, we have created several networks which scale node colour and size according to the local clustering and betweenness. First, we show this for each of the control and synesthetes separately, where these properties correspond to the absolute values of these metrics with scaling for visualisation:
+
+```{r bcnetwork_control, fig.cap = 'Control network for vertex colour and size scale with clustering and betweenness'}
+knitr::include_graphics(paste0(python_imports, 'thickness_matched_clust_cntrl_bcnet.png'))
+```
+
+`
+```{r bcnetwork_syn, fig.cap = 'Synesthete network for vertex colour and size scale with clustering and betweenness'}
+knitr::include_graphics(paste0(python_imports, 'thickness_matched_clust_syn_bcnet.png'))
+```
+
+
+
+```{r diffnetwork, fig.cap = 'Network showing group differences in correlation strength, local clustering and betweenness'}
+knitr::include_graphics(paste0(python_imports, 'thickness_matched_diffnet.png'))
+```
+
+Differences in edge weights are visible between frontal and PCC, temporal cortex and PCC. Differences in clustering are visible for some higher visual areas and other sensory areas. Differences in centrality are seen for auditory regions.
+
+# Positive and negative split graphs
+
+Let's compare the distributions of positive and negative correlations across groups:
+
+```{r signed_pcor_distributions, fig.cap = 'Distributions of positive and negative partial correlations'}
+# Generate partial correlations
+pcor_list = lapply(thickness_matched_clust, FUN = function(df){pcor(df[,8:ncol(df)])$estimate})
+pcor_list = lapply(pcor_list, FUN = function(df){df = melt(df)})
+pcors = bind_rows(pcor_list, .id = 'Group')
+
+# Assign sign variable
+pcors$sign = ifelse(pcors$value > 0, 'Positive', 'Negative')
+pcors = pcors[!pcors$value == 1,] # remove self-correlations
+
+# plot partial correlation distributions
+pcors$Group = factor(pcors$Group, levels = c('Control', 'Syn'))
+pcors$sign = factor(pcors$sign, levels = c('Positive', 'Negative'))
+
+# Plot distributions
+ggplot(data = pcors, aes(x = value, color = Group))+ 
+  geom_density(lwd = 1.05)+
+  scale_color_manual(values = c('blue', 'red'))+
+  labs(x = 'Partial correlation', y = 'Density')+
+  theme(legend.position = 'top')+
+  facet_wrap(~sign, scales = 'free_x')
+
+
+
+```
+
+While the positive distribution looks quite similar, the synesthete negative correlations appears more flat.
+
+In python, we have visualised the positive and negative networks. Let's import them here:
+
+```{r split_net_control_pos, fig.cap = 'Network of positive partial correlations in controls'}
+knitr::include_graphics(paste0(python_imports, 'thickness_matched_clust_cntrl_split_pos.png'))
+```
+
+```{r split_net_control_neg, fig.cap = 'Network of negative partial correlations in controls'}
+knitr::include_graphics(paste0(python_imports, 'thickness_matched_clust_cntrl_split_neg.png'))
+```
+
+```{r split_net_syn_pos, fig.cap = 'Network of positive partial correlations in synesthetes'}
+knitr::include_graphics(paste0(python_imports, 'thickness_matched_clust_syn_split_pos.png'))
+```
+
+```{r split_net_syn_neg, fig.cap = 'Network of negative partial correlations in synesthetes'}
+knitr::include_graphics(paste0(python_imports, 'thickness_matched_clust_syn_split_neg.png'))
+```
+
+Similar to surface area, it looks like the control positive network is has stronger connections at short range, while the negative network as strong connections at multiple distances. For synesthetes, this pattern looks more compressed, with some long-range positive connections and shorter-range negative connections.
+
+Let's compare the network metrics of these:
+
+```{r split_net_metrics, fig.cap = 'Network metrics of positive and negative networks', message = F}
+# Import metrics
+net_metrics = read.csv(paste0(savepath_data,
+                              'hclust/clust_wrd_matched_split_net_metrics.csv'))
+
+net_metrics = melt(net_metrics, .id_vars = c('Group', 'Sign'))
+net_metrics$Sign = factor(net_metrics$Sign, levels = c('Positive', 'Negative'))
+
+# Plot results
+ggplot(data = net_metrics, aes(x = Sign, y = value, fill = Group))+
+  geom_col(color = 'black', alpha = 0.5, position = position_dodge())+
+  scale_fill_manual(values = c('blue', 'red'))+
+  labs(x = '', y = '')+
+  facet_wrap(~variable, scales = 'free_y')
+```
+
+Interestingly, clustering is lower in positive networks, where it is also the same between groups. Efficiency is greater in positive networks, but appears to be proportionally higher for synesthetes in the negative networks. The average partial correlation strength is greater in positive networks, which may be driven by a few particularly strong connections. 
+
+To examine the possible differences in weight-distance relationships between positive and negative networks, let's import the matched distances and weights from python and plot them:
+
+```{r weight_distance_split}
+# Import and combine 2D distance data
+dists_cntrl = read.csv(paste0(savepath_data,
+                              'hclust/clust_wrd_matched_cntrl_split_dists.csv'))
+dists_syn = read.csv(paste0(savepath_data,
+                            'hclust/clust_wrd_matched_syn_split_dists.csv'))
+dists = rbind(dists_cntrl, dists_syn)
+dists$Group = rep(c('Control', 'Syn'), each = nrow(dists)/2)
+dists$Sign = factor(ifelse(dists$weight > 0, 'Positive', 'Negative'),
+                    levels = c('Positive', 'Negative'))
+
+ggplot(data = dists, aes(x = distance, y = weight, colour = Group))+
+  geom_smooth(lwd = 1.1)+
+  scale_color_manual(values = c('blue', 'red'))+
+  labs(x = 'Two-dimensional distance (pixels)', # change to mm at some point
+       y = 'Partial correlation')+
+  facet_wrap(~Sign, scales = 'free_y')
+```
+
+Similarly to surface area, for controls, only the positive correlations show the distance-weight relationship. However, in synesthetes, we also see a distance-weight relationship for negative correlations, although here we see weaker negative correlations at shorter distances.
+
+## Graph complexity
+
+Let's calculate graph complexity using the mean JS divergence:
+
+```{r js_complexity}
+# Get JS complexity for controls and synesthetes
+js_complexity_control = js_complexity(thickness_matched_clust$Control, 'Control')
+js_complexity_syn = js_complexity(thickness_matched_clust$Syn, 'Syn')
+print(js_complexity_control$total_js)
+print(js_complexity_syn$total_js)
+
+# Test differences by comparing mean node divergences
+shapiro.test(js_complexity_control$vertex_means)
+shapiro.test(js_complexity_syn$vertex_means)
+t.test(js_complexity_control$vertex_means, js_complexity_syn$vertex_means)
+cohens_d(js_complexity_control$vertex_means, js_complexity_syn$vertex_means)
+
+# Get differences in vertex complexity
+js_complexity_diffs = js_complexity_control$vertex_means - js_complexity_syn$vertex_means
+print(js_complexity_diffs)
+print(order(abs(js_complexity_diffs), decreasing = TRUE))
+```
+
+Again, as with surface area, we see significantly lower graph complexity in synesthetes, although the effect is not huge.
+
+Let's check randomly re-arranged graphs:
+
+```{r js_complexity_random}
+# Get JS complexity for randomised graphs
+js_complexity_control_rand = js_complexity(thickness_matched_clust$Control, 
+                                           'Control', randomise = T)
+js_complexity_syn_rand = js_complexity(thickness_matched_clust$Syn, 
+                                       'Syn', randomise = T)
+print(js_complexity_control_rand$total_js)
+print(js_complexity_syn_rand$total_js)
+
+# Test differences
+shapiro.test(js_complexity_control_rand$vertex_means)
+shapiro.test(js_complexity_syn_rand$vertex_means)
+t.test(js_complexity_control_rand$vertex_means, js_complexity_syn_rand$vertex_means)
+cohens_d(js_complexity_control_rand$vertex_means, js_complexity_syn_rand$vertex_means)
+
+```
+
+Again, significance is lost when randomly re-arranging the graphs, showing that graph topology is important for group differences in complexity. 

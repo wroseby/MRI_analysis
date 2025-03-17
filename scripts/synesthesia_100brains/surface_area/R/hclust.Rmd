@@ -32,6 +32,7 @@ library(copula)
 library(effsize)
 library(MASS)
 library(MVN)
+library(effectsize)
 ```
 
 ```{r functions, include=F}
@@ -56,6 +57,15 @@ lr_average = function(data){ #
   colnames(data_lr) = gsub(x = colnames(data_lr), pattern = '^X', replacement = '') 
   return(data_lr)
 }
+
+pcorsolve = function(data){
+  covmat = cov(data)
+  premat = solve(covmat)
+  D = sqrt(diag(premat))
+  partial_corr = (-premat / (D %o% D))
+  return(partial_corr)
+}
+
 
 # Function to test for multivariate normality
 MVN_test = function(data){
@@ -238,7 +248,7 @@ optimal_cluster = function(data, clust_method, cut_values, seed){
 }
 
 # Function to calculate and plot partial correlation distributions according to a grouping variable
-plot_pcors = function(data_list, nclust, group_vec){
+plot_pcors = function(data_list, nclust, group_vec, colours = c('blue', 'red')){
   # generate partial correlations
   pcor_list = lapply(data_list, FUN = function(df){pcor(df[,8:ncol(df)])$estimate})
   # melt to long form
@@ -255,14 +265,14 @@ plot_pcors = function(data_list, nclust, group_vec){
   pcors$Sample = factor(pcors$Sample)
   ggplot(data = pcors, aes(x = value, color = Group, group = Sample))+ 
     geom_density(lwd = 1.05)+
-    scale_color_manual(values = c('blue', 'red'))+
+    scale_color_manual(values = colours)+
     labs(x = 'Partial correlation', y = 'Density')+
     theme(legend.position = 'top')
 }
 
 # Function to generate copula and produce sample data
-sampleCopula = function(data, log = T, 
-                        copulatype = c('gaussian', 'empirical', 't'), invert = c('gaussian', 'empirical'),
+sampleCopula = function(data, log = F, 
+                        copulatype = c('gaussian', 'empirical', 't', 'vine'), invert = c('gaussian', 'empirical'),
                         n = 102, n_samp = 10){
   
   # initialise results
@@ -297,11 +307,25 @@ sampleCopula = function(data, log = T,
     copula_fit = fitCopula(copula_t, pseudoobs)
     copula = copula_fit@copula
   }
+  if (copulatype == 'vine'){
+    # VineCopula package:
+    # copula = RVineStructureSelect(pseudoobs, familyset = c(1,2,)) 
+    # rvinecopulib package
+    copula = vinecop(pseudoobs, family_set = c("elliptical"), cores = 3)
+  }
   
   # get samples from copula
   copula_samples = list()
   for (i in 1:n_samp){
+    if (copulatype == 'vine'){
+      # VineCopula package:
+      #copula_samples[[i]] = RVineSim(n, copula)
+      # rvinecopulib package:
+      copula_samples[[i]] = rvinecop(n, copula)
+    }
+    else{
     copula_samples[[i]] = rCopula(n, copula)
+    }
   
     # invert copula samples
     # inversion with gaussian cdf
@@ -319,10 +343,14 @@ sampleCopula = function(data, log = T,
         inv_ecdf = approxfun(ecdf_col(as.matrix(data)[,j]), as.matrix(data)[,j], method = "linear", rule = 2) 
         samples[[paste0("Cluster", j)]] = inv_ecdf(copula_samples[[i]][,j])
       }
+      samples = do.call(cbind, samples)
+    }
+    # no inversion - uniform samples
+    if (invert == 'none'){
+      samples = copula_samples[[i]]
     }
     
     # compile samples
-    samples = do.call(cbind, samples)
     results = list()
     results[[1]] = samples
     if (log == T){results[[1]] = exp(results[[1]])}
@@ -336,6 +364,57 @@ sampleCopula = function(data, log = T,
   
   return(copula_res)
   
+}
+
+# Function to calculate graph complexity based on pairwise Jensen-Shannon divergence
+js_complexity = function(data, group, randomise = F) {
+  # Helper functions
+  normalize = function(x) { # normalise distributions to sum to 1
+    total = sum(x)
+    if (total == 0) return(rep(1 / length(x), length(x)))  # Handle zero-sum case
+    return(x / total)
+  }
+  kl_divergence = function(P, Q) { # Kullback-Leibler divergence
+    nonzero = P > 0 # to avoid logging 0
+    sum(P[nonzero] * log2(P[nonzero] / Q[nonzero]))
+  }
+  js_divergence = function(P, Q) { # Jensen-Shannon divergence
+    M = 0.5 * (P + Q)
+    0.5 * kl_divergence(P, M) + 0.5 * kl_divergence(Q, M)
+  }
+  
+  # Wrangle data
+  data = data[data$Group == group, 8:ncol(data)] # get desired group and variables
+  edge_weights = pcorsolve(data) # get partial correlations
+  if (randomise == T){ # if we want to randomly reorganise graph
+    set.seed(params$seed)
+    shuffled_weights = sample(as.vector(edge_weights)) # randomly shuffle edge weights
+    edge_weights = matrix(shuffled_weights, nrow = nrow(edge_weights)) # put back into adjacency matrix
+  }
+  edge_weights = abs(edge_weights) # get absolute partial correlations
+  prob_matrix = t(apply(edge_weights, 1, normalize)) # normalise distributions
+  
+  
+  # Get JS divergence between every vertex
+  n = nrow(prob_matrix)
+  js_matrix = matrix(0, n, n)
+  for (i in 1:(n - 1)) {
+    for (j in (i + 1):n) {
+      js_val = js_divergence(prob_matrix[i, ], prob_matrix[j, ])
+      js_matrix[i, j] = js_val
+      js_matrix[j, i] = js_val
+    }
+  }
+  
+  # Get mean vertex- and graph-wise divergences
+  vertex_means = rowMeans(js_matrix)
+  total_js = mean(js_matrix)
+
+  return(list(
+    js_matrix = js_matrix,
+    vertex_means = vertex_means,
+    total_js = total_js
+  ))
 }
 
 ```
@@ -359,7 +438,8 @@ To obtain a specific clustering here, we have to choose a value which specifies 
 
 Additionally, because the process of finding the optimal cluster depends to some degree on random subsampling of control data, we will iterate the process over 10 random seeds to see if there is a stable optimal cluster number. The code below will perform this iteration to find the optimal cutoff value and the number of clusters associated with it.
 
-```{r ward_clustering_optimisation, message=F, warning=F}
+
+```{r ward_clustering_optimisation, message=F, warning=F, cache=T}
 # Set random seeds
 seeds = c(674345, 811071, 276503, 411732, 475378, 
           690070, 425943, 729736, 621889, 660812)
@@ -403,10 +483,63 @@ ggplot(data = clust_wrd_pos, aes(x = x, y = max(y) - y, fill = cluster))+
   theme(legend.position = 'none',
         axis.text = element_blank())
 
+# Write clustering to csv
+write.csv(clust_wrd_pos, file = paste0(savepath_data, '/hclust/clust_wrd_pos.csv'))
+
 ```
 The clusters seem to form according to anatomical location, with proximal parcels falling into the same cluster. The number of parcels in a cluster varies from about 1 to 6. This indicates the clustering is uncovering some anatomical structure in the data.
 
+To make sure our examination of correlations reflects simply the group differences in correlation structure, rather than differences in regional size, we want to ensure that we correct for any differences in the size of each ROI. We'll examine this first for the lr-averaged parcels, and also for the identified clusters, by fitting linear models to compare groups at each region:
+
+```{r linear_model, warning=F, message=F}
+# Create new dataframe for linear model residuals for lr-averaged parcels
+SA_abs_lr_lm = SA_abs_lr[, c('ID', 'Age', 'Sex', 'Group', 'Subgroup', 'Scan', 'Partition')]  
+
+# Fit model for each area and store result
+model_summaries = list()
+for (region in colnames(SA_abs_lr[, 8:ncol(SA_abs_lr)])) {  
+  model = lm(SA_abs_lr[[region]] ~ Group, data = SA_abs_lr)
+  model_summaries[[region]] = summary(model)
+  SA_abs_lr_lm[[paste0(region)]] = residuals(model)  
+}
+
+print(head(SA_abs_lr_lm))
+
+# Check for any significant differences
+sapply(model_summaries, FUN = function(list){
+  list[["coefficients"]][2,4]
+})
+
+#SA_abs_lr = SA_abs_lr_lm # replace data - uncomment if desired
+
+# Summarise lr data into clusters
+SA_abs_cntrl_wrd = rbind(summarise_clusters(SA_abs_lr[SA_abs_lr$Group == 'Control',], clust_wrd_pos)[[1]],
+                            summarise_clusters(SA_abs_lr[SA_abs_lr$Group == 'Syn',], clust_wrd_pos)[[1]])
+
+# Create new dataframe for linear model residuals for clusters
+SA_abs_cntrl_wrd_lm = SA_abs_cntrl_wrd[, c('ID', 'Age', 'Sex', 'Group', 'Subgroup', 'Scan', 'Partition')]
+
+# Fit model for each cluster and store result
+model_summaries = list()
+for (cluster in colnames(SA_abs_cntrl_wrd[, 8:ncol(SA_abs_cntrl_wrd)])) {  
+  model = lm(SA_abs_cntrl_wrd[[cluster]] ~ Group, data = SA_abs_cntrl_wrd)
+  model_summaries[[cluster]] = summary(model)
+  SA_abs_cntrl_wrd_lm[[paste0(region)]] = residuals(model)  
+}
+
+print(head(SA_abs_lr_lm))
+
+# Check for any significant differences
+sapply(model_summaries, FUN = function(list){
+  list[["coefficients"]][2,4]
+})
+
+```
+
+Because there are no differences in region size between the groups that exceed any variation within the groups, for either lr-averaged parcels or clusters, we can use the raw surface area data. 
+
 Let's summarise the data within the clusters and export it to a .csv file for analysis in python. Since we want to be able to carry out some statistical comparison with empirical data, we will perform the summarising for 6 unique subsamples of n = 102 from the control dataset of n = 650, to match the synesthete sample size. While we're here, we'll also plot the partial correlation distributions for the control subsamples and synesthetes:
+
 
 ```{r cluster_unique_subsamples, warning=F, message=F}
 # Generate 6 groups of 102 random sample numbers
@@ -526,7 +659,8 @@ SA_abs_matched_clust = split(SA_abs_matched_clust[[1]],
 
 # Plot partial correlation distributions
 plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, 
-           group_vec = c('Female', 'Male'))
+           group_vec = c('Female', 'Male'),
+           colours = c('pink', 'cyan'))
 
 ```
 
@@ -567,7 +701,8 @@ for (i in 1:ncol(age_combos)){
   SA_abs_matched_clust = split(SA_abs_matched_clust[[1]], 
                                SA_abs_matched_clust[[1]]$Age)
   plots[[i]] = plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, 
-                          group_vec = age_combos[,i])
+                          group_vec = age_combos[,i],
+                          colours = c('forestgreen', 'orange'))
 }
 
 grid.arrange(grobs = plots, ncol = 3, widths = c(3,3,3))
@@ -612,7 +747,8 @@ for (i in 1:ncol(age_combos)){
   SA_abs_matched_clust = split(SA_abs_matched_clust[[1]], 
                                SA_abs_matched_clust[[1]]$Scan)
   plots[[i]] = plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, 
-                          group_vec = scan_combos[,i])
+                          group_vec = scan_combos[,i],
+                          colours = c('purple', 'coral'))
 }
 
 grid.arrange(grobs = plots, ncol = 3)
@@ -704,37 +840,7 @@ write.csv(SA_abs_matched_clust$Control,
           row.names = F)
 ```
 
-Analysis in python shows that there are indeed the expected differences between the macthed synesthete and control samples in terms of basic network metrics. Let's import the image files to visualise the networks:
-
-```{r matched_control_network, fig.cap = 'Partial correlation network of 62 SA clusters in controls'}
-# Import network visualisations
-python_imports = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/outputs/synesthesia_100brains/surface_area/python/'
-knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_cntrl_net.png'))
-```
-
-```{r matched_syn_network, fig.cap = 'Partial correlation network of 62 SA clusters in synesthetes'}
-knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_syn_net.png'))
-```
-
-In our python analysis we've also matched the edge weights to the 2D distance between clusters. Let's import the data to visualise this relationship:
-
-```{r weight_by_dist, warning=F, message=F}
-# Import and combine 2D distance data
-dists_cntrl = read.csv(paste0(savepath_data,
-                              'hclust/clust_wrd_matched_cntrl_dists.csv'))
-dists_syn = read.csv(paste0(savepath_data,
-                            'hclust/clust_wrd_matched_syn_dists.csv'))
-dists = rbind(dists_cntrl, dists_syn)
-dists$Group = rep(c('Control', 'Syn'), each = nrow(dists)/2)
-
-ggplot(data = dists, aes(x = distance, y = weight, colour = Group))+
-  geom_smooth(lwd = 1.1)+
-  scale_color_manual(values = c('blue', 'red'))+
-  labs(x = 'Two-dimensional distance (pixels)', # change to mm at some point
-       y = 'Absolute partial correlation')
-```
-
-While controls appear to have stronger relationships at shorter distances, in synesthetes the relationship is flatter with stronger correlations at longer distances compared to controls.
+Analysis in python shows that there are indeed the expected differences between the macthed synesthete and control samples in terms of basic network metrics. 
 
 ## Cluster number perturbation
 
@@ -832,7 +938,7 @@ However, the choice of copula depends on the properties of the population correl
 
 Therefore, we are going to check the MVN assumption holds for 1) our full control data, prior to clustering and 2) our matched data, after clustering. We first examine the Mahalanobis distances of each variable, which should follow a chi-squared distribution. We also perform several tests from the MVN package. Let's first do this for the complete control data used to generate the clusters:
 
-```{r}
+```{r lr_MVN_tests}
 # MVN tests for complete control data, prior to clustering
 MVN_test(SA_abs_lr[SA_abs_lr$Group == 'Control',8:ncol(SA_abs_lr)])
 ```
@@ -841,14 +947,14 @@ While the tests are not in complete agreement of an MVN distribution, the Mahala
 
 Let's now check the matched data, after clustering, to ensure our partial correlations appropriately describe the cluster dependence structure in each group:
 
-```{r MVN_tests}
+```{r cluster_MVN_tests}
 MVN_test(SA_abs_matched_clust$Control[,8:ncol(SA_abs_matched_clust$Control)])
 MVN_test(SA_abs_matched_clust$Syn[,8:ncol(SA_abs_matched_clust$Syn)])
 ```
 
 The results here are similar to the full control data. The distribution of Mahalanobis distances would point towards MVN for both groups. However, the tests are not completely suggestive of this. If we check the distributions of the individual clusters:
 
-```{r}
+```{r cluster_univariate_normality}
 table(mvn(SA_abs_matched_clust$Control[,8:ncol(SA_abs_matched_clust$Control)])
       [['univariateNormality']]$Normality)
 ```
@@ -867,7 +973,7 @@ set.seed(params$seed)
 SA_abs_matched_clust_cntrl_copula = 
   sampleCopula(data = SA_abs_matched_clust$Control, 
                                                  log = F, 
-                                                 copulatype = c('gaussian'), 
+                                                 copulatype = c('vine'), 
                                                  invert = c('empirical'),
                                                  n = 102, 
                                                  n_samp = 10)
@@ -875,7 +981,7 @@ set.seed(params$seed)
 SA_abs_matched_clust_syn_copula = 
   sampleCopula(data = SA_abs_matched_clust$Syn, 
                                                  log = F, 
-                                                 copulatype = c('gaussian'), 
+                                                 copulatype = c('vine'), 
                                                  invert = c('empirical'),
                                                  n = 102, 
                                                  n_samp = 10)
@@ -955,3 +1061,273 @@ ggplot(data = net_metrics, aes(x = Group, y = value,
                                       mean_eb = 'Mean edge betweenness',
                                       mean_vb = 'Mean vertex betweenness')))
 ```
+
+# Analysis of similarity-distance relationship
+
+These results confirm that there are clear differences between controls and synesthetes in their correlation structure. We now want to extend our analysis to include the examine the role of physical distance.
+
+## Weight by distance relationship
+
+To examine the possible spatial differences between the groups, we can visualise the networks. We have drawn the graphs in python, so let's import them here:
+
+```{r matched_control_network, fig.cap = 'Partial correlation network of 62 SA clusters in controls'}
+# Import network visualisations
+python_imports = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/outputs/synesthesia_100brains/surface_area/python/'
+knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_cntrl_net.png'))
+```
+
+```{r matched_syn_network, fig.cap = 'Partial correlation network of 62 SA clusters in synesthetes'}
+knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_syn_net.png'))
+```
+
+In python, we have also calculated the 2D distance between every node and merged these with the edge weights (i.e. partial correlation strengths). Let's import that data and visualise it for the two groups:
+
+```{r weight_by_dist, fig.cap = 'Distance-correlation relationships for controls and synesthetes', warning=F, message=F}
+# Import and combine 2D distance data
+dists_cntrl = read.csv(paste0(savepath_data,
+                              'hclust/clust_wrd_matched_cntrl_dists.csv'))
+dists_syn = read.csv(paste0(savepath_data,
+                            'hclust/clust_wrd_matched_syn_dists.csv'))
+dists = rbind(dists_cntrl, dists_syn)
+dists$Group = rep(c('Control', 'Syn'), each = nrow(dists)/2)
+
+ggplot(data = dists, aes(x = distance, y = weight, colour = Group))+
+  geom_smooth(lwd = 1.1)+
+  scale_color_manual(values = c('blue', 'red'))+
+  labs(x = 'Two-dimensional distance (pixels)', # change to mm at some point
+       y = 'Absolute partial correlation')
+```
+
+While controls appear to have stronger relationships at shorter distances, in synesthetes the relationship is flatter with stronger correlations at longer distances compared to controls.
+
+## Small-worldness
+
+With the 2D distances, we can also examine small-worldness through small-world propensity (SWP). This metric is calculated by comparing the clustering coefficient and characteristic path length of the observed network to two null models: a locally-strong lattice network and a distantly-strong randomly rewired network. 
+
+In python, we have calculated *SWP* independently for each of our observed graphs. This means that each observed graph is compared to its own null models, thus controlling for differences in node strengths. We have also calculated *delta*, which indicates which null model properties are driving deviations from perfect small-worldness. 
+
+Let's import the results for comparison:
+
+```{r SWP, fig.cap = 'SWP and delta values in controls and synesthetes'}
+# Import SWP results
+SWP = read.csv(paste0(savepath_data,
+                              'hclust/clust_wrd_matched_SWP.csv'))
+SWP = melt(SWP, id.vars = 'Group')
+
+# Plot SWP and delta
+ggplot(data = SWP, aes(x = Group, y = value, fill = Group))+
+  geom_col(position = position_dodge(), color = 'black', alpha = 0.5)+
+  scale_fill_manual(values = c('blue', 'red'))+
+  labs(x = '',
+       y = '')+
+    facet_wrap(~variable, scales = 'free_y')
+```
+
+While the control SWP is around what you would expect for a brain-derived network, the synesthete SWP is lower, indicating less small-world properties. The delta values indicate that while both networks are closer to their random null models, in synesthetes this is particularly extreme, suggesting a substantial deviation from local clustering.
+
+# Analysis of local vertex properties
+
+So far, we have shown that control and synesthete networks differ in several global properties. However, it would be interesting to see if this is a global trend or if specific clusters contribute to these patterns.
+
+In python, we have created several networks which scale node colour and size according to the local clustering and betweenness. First, we show this for each of the control and synesthetes separately, where these properties correspond to the absolute values of these metrics with scaling for visualisation:
+
+```{r bcnetwork_control, fig.cap = 'Control network for vertex colour and size scale with clustering and betweenness'}
+knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_cntrl_bcnet.png'))
+```
+
+`
+```{r bcnetwork_syn, fig.cap = 'Synesthete network for vertex colour and size scale with clustering and betweenness'}
+knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_syn_bcnet.png'))
+```
+
+Along with the global differences in clustering, we see some more specific differences. Vertex betweenness is more variable for synesthetes than controls, with some vertices (such as the PCC) having very high betweenness. Vertices with higher betweenness also seem to have greater clustering, although this isn't always the case.
+
+Note that this can be difficult to interpret since betweenness and clustering will be overall greater when there are stronger edges (which there are in synesthetes). Note - we should compare the distributions of the absolute values of these metrics, since the scaling for visualisation could also be misleading.
+
+To perhaps improve the visualisation, we also created a network showing the differences between the control and synesthete networks. Node colour and size correspond to differences in local clustering and betweenness, while edge size corresponds to the size of the difference between partial correlation size. All differences are absolute. 
+
+```{r diffnetwork, fig.cap = 'Network showing group differences in correlation strength, local clustering and betweenness'}
+knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_diffnet.png'))
+```
+
+The biggest differences in clustering appear to be in the prefrontal cortex, hippocampus and PCC. The biggest differences in betweenness are in the hippocampus and PCC. The biggest differences in edge weights are from the mPFC to hippocampus, PCC to hippocampus, DLPFC to parietal cortex.
+
+# Positive and negative split graphs
+
+So far, we have been looking at networks formed from absolute partial correlation, under the assumption that any association is important for distinguishing groups. However, there may be specific information contained within the positive or negative associations alone. To address this, we'll examine networks formed from just the positive or negative correlations.
+
+First, let's compare the distributions of positive and negative correlations across groups:
+
+```{r signed_pcor_distributions, fig.cap = 'Distributions of positive and negative partial correlations'}
+# Generate partial correlations
+pcor_list = lapply(SA_abs_matched_clust, FUN = function(df){pcor(df[,8:ncol(df)])$estimate})
+pcor_list = lapply(pcor_list, FUN = function(df){df = melt(df)})
+pcors = bind_rows(pcor_list, .id = 'Group')
+
+# Assign sign variable
+pcors$sign = ifelse(pcors$value > 0, 'Positive', 'Negative')
+pcors = pcors[!pcors$value == 1,] # remove self-correlations
+
+# plot partial correlation distributions
+pcors$Group = factor(pcors$Group, levels = c('Control', 'Syn'))
+pcors$sign = factor(pcors$sign, levels = c('Positive', 'Negative'))
+
+# Plot distributions
+ggplot(data = pcors, aes(x = value, color = Group))+ 
+  geom_density(lwd = 1.05)+
+  scale_color_manual(values = c('blue', 'red'))+
+  labs(x = 'Partial correlation', y = 'Density')+
+  theme(legend.position = 'top')+
+  facet_wrap(~sign, scales = 'free_x')
+
+
+
+```
+
+Overall the two distributions look quite similar. The synesthetes may have a higher number of strong correlations (0.5) compared to controls in the negative more so than the positive, while the opposite is true for somewhat weaker correlations (0.2).
+
+In python, we have visualised the positive and negative networks. Let's import them here:
+
+```{r split_net_control_pos, fig.cap = 'Network of positive partial correlations in controls'}
+knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_cntrl_split_pos.png'))
+```
+
+```{r split_net_control_neg, fig.cap = 'Network of negative partial correlations in controls'}
+knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_cntrl_split_neg.png'))
+```
+
+```{r split_net_syn_pos, fig.cap = 'Network of positive partial correlations in synesthetes'}
+knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_syn_split_pos.png'))
+```
+
+```{r split_net_syn_neg, fig.cap = 'Network of negative partial correlations in synesthetes'}
+knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_syn_split_neg.png'))
+```
+
+It looks like the control positive network is has stronger connections at short range, while the negative network as strong connections at multiple distances. For synesthetes, this pattern looks more compressed, with some long-range positive connections and shorter-range negative connections.
+
+Let's compare the network metrics of these:
+
+```{r split_net_metrics, fig.cap = 'Network metrics of positive and negative networks', message = F}
+# Import metrics
+net_metrics = read.csv(paste0(savepath_data,
+                              'hclust/clust_wrd_matched_split_net_metrics.csv'))
+
+net_metrics = melt(net_metrics, .id_vars = c('Group', 'Sign'))
+net_metrics$Sign = factor(net_metrics$Sign, levels = c('Positive', 'Negative'))
+
+# Plot results
+ggplot(data = net_metrics, aes(x = Sign, y = value, fill = Group))+
+  geom_col(color = 'black', alpha = 0.5, position = position_dodge())+
+  scale_fill_manual(values = c('blue', 'red'))+
+  labs(x = '', y = '')+
+  facet_wrap(~variable, scales = 'free_y')
+```
+
+Interestingly, clustering is lower in positive networks, where it is also the same between groups. Efficiency is greater in positive networks, but appears to be proportionally higher for synesthetes in the negative networks. The average partial correlation strength is greater in positive networks, which may be driven by a few particularly strong connections. 
+
+To examine the possible differences in weight-distance relationships between positive and negative networks, let's import the matched distances and weights from python and plot them:
+
+```{r weight_distance_split}
+# Import and combine 2D distance data
+dists_cntrl = read.csv(paste0(savepath_data,
+                              'hclust/clust_wrd_matched_cntrl_split_dists.csv'))
+dists_syn = read.csv(paste0(savepath_data,
+                            'hclust/clust_wrd_matched_syn_split_dists.csv'))
+dists = rbind(dists_cntrl, dists_syn)
+dists$Group = rep(c('Control', 'Syn'), each = nrow(dists)/2)
+dists$Sign = factor(ifelse(dists$weight > 0, 'Positive', 'Negative'),
+                    levels = c('Positive', 'Negative'))
+
+ggplot(data = dists, aes(x = distance, y = weight, colour = Group))+
+  geom_smooth(lwd = 1.1)+
+  scale_color_manual(values = c('blue', 'red'))+
+  labs(x = 'Two-dimensional distance (pixels)', # change to mm at some point
+       y = 'Absolute partial correlation')+
+  facet_wrap(~Sign, scales = 'free_y')
+```
+
+Splitting the partial correlations by positive and negative, we see that the overall relationship between weight and distance we observed previously is largely constrained to the positive networks. In the positive network, synesthetes show weaker correlations at a shorter distance, and possibly stronger correlations at long distances compared to controls. However, in the negative network, there is no obvious relationship between distance and weight in controls, while in synesthetes, there is a trend towards decreased correlation magnitude at longer distances.  
+
+It would be a good to get an idea of the effect sizes and variance for the network metric differences. We have also created split networks for the copula samples, so let's import those results:
+
+```{r split_nets_copula, warning=F, message=F}
+# Import metrics
+net_metrics = read.csv(paste0(savepath_data, 
+                              'hclust/clust_wrd_matched_split_copula_net_metrics.csv'))
+
+# Get cohen's d for control-syn comparisons for pos and neg networks
+net_metrics$Sign = factor(net_metrics$Sign, levels = c('Positive', 'Negative'))
+cohensd = net_metrics %>%
+  group_by(Sign) %>%
+  summarise(across(where(is.numeric), ~ cohens_d(.x ~ Group)$Cohens_d, .names = "d_{.col}"))
+print(cohensd)
+
+# Get summary statistics
+net_metrics = melt(net_metrics, .id_vars = c('Group', 'Sign'))
+net_metrics = net_metrics %>%
+  group_by(Group, Sign, variable) %>%
+  summarise(value_mean = mean(value), value_sd = sd(value))
+
+# Plot results
+ggplot(data = net_metrics, aes(x = Sign, y = value_mean, fill = Group))+
+  geom_col(color = 'black', alpha = 0.5, position = position_dodge())+
+  geom_errorbar(aes(ymin = value_mean - value_sd, ymax = value_mean + value_sd),
+                position = position_dodge())+
+  scale_fill_manual(values = c('blue', 'red'))+
+  labs(x = '', y = '')+
+  facet_wrap(~variable, scales = 'free_y')
+
+```
+
+These results suggest that the differences between controls and synesthetes are generally larger for the negative networks than the positive networks. Additionally, the variance of control statistics like mean correlation is actually quite similar between positive and negative networks, suggesting that these differences represent global changes in correlation strength by sign rather than contributions of a few outliers. 
+
+## Graph complexity
+
+An interesting line of questioning is to ask how complex the structural organisation of the brain is within different groups. A way of conceptualising complexity is about how many different patterns are represented in the organisation. If there are few unique patterns, complexity is low; if there are many, it is high. 
+
+Complexity of signals often consists of looking at different patterns over time. However, since we are looking at static graphs, we will examine complexity of the connection topology at each node, then average this for the entire network. In our case, we are also looking at weighted, fully-connected graphs. This means complexity also cannot be evaluated based on numbers of connections, at least without arbitrary thresholding. To overcome this, we can ask how similar is the connection topology between nodes. 
+
+The below function calculates the Jensen-Shannon divergence for the distributions of edge weights (partial correlations) for each pair of nodes, averaging it over each node as well as over the whole network. This measure gives an idea of how similar the edge weight distributions are from node to node. If JS divergence is low, this means edge distributions are similar between nodes and complexity could be considered to be low, and vice versa. Let's calculate the mean JS divergences for controls and synesthetes using the matched clustered data:
+
+```{r js_complexity}
+# Get JS complexity for controls and synesthetes
+js_complexity_control = js_complexity(SA_abs_matched_clust$Control, 'Control')
+js_complexity_syn = js_complexity(SA_abs_matched_clust$Syn, 'Syn')
+print(js_complexity_control$total_js)
+print(js_complexity_syn$total_js)
+
+# Test differences by comparing mean node divergences
+shapiro.test(js_complexity_control$vertex_means)
+shapiro.test(js_complexity_syn$vertex_means)
+t.test(js_complexity_control$vertex_means, js_complexity_syn$vertex_means)
+cohens_d(js_complexity_control$vertex_means, js_complexity_syn$vertex_means)
+
+# Get differences in vertex complexity
+js_complexity_diffs = js_complexity_control$vertex_means - js_complexity_syn$vertex_means
+print(js_complexity_diffs)
+print(order(abs(js_complexity_diffs), decreasing = TRUE))
+```
+
+Here we see that despite a wider distribution of partial correlations, complexity is significantly lower in the synesthete network, suggesting that nodes are more similar in their distributions of connections. This could indicate reduced regional specialisation in synesthetes, as regions are less specific and unique in their connections. When looking at specific nodes, we see that regions at the parietal cortex (PGi and PGs) have a much reduced complexity in synesthetes, while areas in the frontal cortex (area 8 and 9) show very little difference in complexity. 
+
+It is important to check to what degree this complexity measure captures randomness in graph structure. If randomness of connection strength is high, then one may expect a strong divergence between nodes. Let's calculate the complexity of graphs that have been randomly shuffled for their edge weights:
+
+```{r js_complexity_random}
+# Get JS complexity for randomised graphs
+js_complexity_control_rand = js_complexity(SA_abs_matched_clust$Control, 
+                                           'Control', randomise = T)
+js_complexity_syn_rand = js_complexity(SA_abs_matched_clust$Syn, 
+                                       'Syn', randomise = T)
+print(js_complexity_control_rand$total_js)
+print(js_complexity_syn_rand$total_js)
+
+# Test differences
+shapiro.test(js_complexity_control_rand$vertex_means)
+shapiro.test(js_complexity_syn_rand$vertex_means)
+t.test(js_complexity_control_rand$vertex_means, js_complexity_syn_rand$vertex_means)
+cohens_d(js_complexity_control_rand$vertex_means, js_complexity_syn_rand$vertex_means)
+
+```
+
+Indeed, we see that for both the control and synesthete networks, the mean divergence is greater when the networks are randomly shuffled. This means that the measure may be capturing randomness in the structure of the networks. Interestingly, randomisation does not make the complexity larger in the synesthete network compared to the unrandomised control network, suggesting that the graph-wide distribution of connection weights plays a larger role in shaping the average divergence than the network topology. Nonetheless, we do now find reduced evidence for a difference between network complexity when the graphs are randomised, showing that topology is important for group differences in complexity. 
