@@ -37,16 +37,16 @@ def partial_cor(data, absolute = True):
 
     return (data_pcorr) # return the absolute partial correlations
 
-def data_to_graphs(filename, groupname = False, log = False, split_sign = False):
+def data_to_graphs(data, groupname = False, log = False, split_sign = False, absolute = True):
     """
     Convert data file into a graph
-    :param filename: name of file where data is stored
+    :param data: name of file where data is stored
     :param groupname: if True then data is split by the group name and 'Control'
     :param log: if True then data is log-transformed
     :param split_sign: if True then partial correlation matrix is split into positive and negative
     """
-
-    data = pd.read_csv(filename)  # read data
+    if isinstance(data, str):
+        data = pd.read_csv(data)  # if giving filename, read it in
 
     if log:
         data.iloc[:,7:] = np.log(data.iloc[:,7:])
@@ -75,7 +75,7 @@ def data_to_graphs(filename, groupname = False, log = False, split_sign = False)
 
     else: # if not splitting positive and negative
         for datum in data:
-            pcormat = partial_cor(datum.iloc[:,7:], absolute = True)
+            pcormat = partial_cor(datum.iloc[:,7:], absolute = absolute)
             pcormats.append(pcormat)
         graphs = []
         for i in range(len(pcormats)):
@@ -127,7 +127,7 @@ def measure_net(graph):
     for e in graph.edges(): # for all the graph edges
         weight_inv[e] = 1.0 / graph.ep.weight[e]  # get inverted weights
     graph.ep['weight_inv'] = weight_inv # set inverted weights as graph edge property
-    hist = distance_histogram(graph, weight = graph.ep.weight_inv, bins=[0,0.5]) # get distance histogram with inverted weights
+    # hist = distance_histogram(graph, weight = graph.ep.weight_inv, bins=[0,0.5]) # get distance histogram with inverted weights
     total_efficiency = 0.0  # initialise total efficiency for graph
     count = 0  # initialise a count
     distances = shortest_distance(graph, weights=graph.ep.weight_inv) # shortest distances between vertices using inverted weights
@@ -151,7 +151,7 @@ def measure_net(graph):
 
     net_metrics = pd.DataFrame(net_metrics)
 
-    return(net_metrics, hist)
+    return(net_metrics)
 
 # Function to plot graphs in the following style:
 # anatomical layout, given x and y coordinates
@@ -246,7 +246,7 @@ def get_dists(positions, name):
     distances = pd.DataFrame(distances)  # convert to dataframe
     return(distances)
 
-def weight_by_dist(cormat, dists):
+def weight_by_dist(cormat, dists, plot = True):
     """
     Merge edge weights with their physical distances
     :param cormat: a pandas DataFrame of vertex correlations
@@ -263,10 +263,11 @@ def weight_by_dist(cormat, dists):
     graph_dist = graph_dist[graph_dist['index'] != graph_dist['area_1']]  # drop self-loops
     edge_dist = graph_dist.drop_duplicates(subset='pair').reset_index(drop=True)  # drop repeated pairs
 
-    fig, axs = plt.subplots(1, 1, figsize=(8, 8))
-    axs.scatter(edge_dist['distance'], edge_dist['weight'], alpha=0.8, s=1.5, c=edge_dist['weight'])  # plot of weight over distance
-    axs.set_xlabel('Distance')
-    axs.set_ylabel('pcor')
+    if plot:
+        fig, axs = plt.subplots(1, 1, figsize=(8, 8))
+        axs.scatter(edge_dist['distance'], edge_dist['weight'], alpha=0.8, s=1.5, c=edge_dist['weight'])  # plot of weight over distance
+        axs.set_xlabel('Distance')
+        axs.set_ylabel('pcor')
 
     return graph_dist
 
@@ -341,7 +342,7 @@ def SWP(cormat, dists, C_obs, L_obs):
     L_latt = calculate_path_length(graph_latt)
     L_rand = calculate_path_length(graph_rand)
 
-    print(C_latt, C_rand, L_latt, L_rand) # sanity check - makes sense
+    print(C_latt, C_rand, L_latt, L_rand) # sanity check
 
     # calculate divergences from lattice and random models
     delta_C = (C_latt - C_obs) / (C_latt - C_rand)
@@ -353,7 +354,10 @@ def SWP(cormat, dists, C_obs, L_obs):
     delta = (((4 * alpha) / np.pi) - 1) # get delta value
     delta = np.clip(delta, -1, 1) # set range
 
-    return SWP, delta
+    # put into DataFrame
+    SWP_results = pd.DataFrame(np.array([[SWP, delta]]), columns=['SWP', 'delta'])
+
+    return SWP_results
 
 def hedges_g(data, population_mean):
     """
@@ -521,3 +525,171 @@ def draw_graph_difference(graphs, positions, absolute_edges, output_file):
         output_size = (800,800),
         output=output_file
     )
+    
+def permutation_test_metrics(data1, data2, observed_metrics, n_permutations=1000, test_directions=None):
+    """
+    Perform a permutation test by randomizing group labels and computing metric differences.
+
+    Parameters:
+    - data1, data2: Pandas DataFrames containing observations for each group. Must have a 'Group' column.
+    - n_permutations: Number of permutations to perform.
+
+    Returns:
+    - A DataFrame with metric differences for each iteration.
+    """
+
+    # Compute observed metrics
+    observed_diffs = observed_metrics.iloc[0, :] - observed_metrics.iloc[1, :]  # Difference: Group1 - Group2
+
+    # Store permutation results
+    null_diffs = pd.DataFrame(columns=observed_diffs.index, index=range(n_permutations))
+    combined_data = pd.concat([data1, data2])
+    group_labels = combined_data["Group"].unique()
+    group1_label, group2_label = group_labels
+
+    for i in range(n_permutations):
+        # Shuffle group labels
+        permuted_data = combined_data.copy()
+        permuted_data["Group"] = np.random.permutation(permuted_data["Group"])
+
+        # Generate graphs from permuted data
+        graphs_perm = data_to_graphs(permuted_data, groupname=group2_label)
+
+        # Compute metrics for permuted groups
+        permuted_metrics = []  # initialise metric list
+        for graph in graphs_perm:  # for each graph and group
+            metrics = measure_net(graph)  # get the network metrics
+            permuted_metrics.append(metrics)  # add net metrics to list
+
+        permuted_metrics = pd.concat(permuted_metrics,ignore_index=True)
+        permuted_diffs = permuted_metrics.iloc[0, :] - permuted_metrics.iloc[1, :]
+
+        # Store null differences
+        null_diffs.iloc[i, :] = permuted_diffs.values
+
+    # Two-tailed P-values, quantile method
+    #lower_percentile = diff_df.quantile(0.025)
+    #upper_percentile = diff_df.quantile(0.975)
+    #p_values = ((observed_diff < lower_percentile) | (observed_diff > upper_percentile)).astype(int)
+
+    # Two-tailed P-values, proportional method
+    # p_values = (np.abs(null_diffs) >= np.abs(observed_diffs)).mean()
+
+    # One-tailed P-values
+    p_values = {}
+    effect_sizes = {}  # Store Cohen's d
+    for metric in observed_diffs.index:
+        direction = test_directions.get(metric, "greater")  # Default to greater if not specified
+        null_distribution = null_diffs[metric].dropna()  # Drop NaNs if any
+
+        # Compute effect sizes
+        null_mean = null_distribution.mean()
+        null_std = null_distribution.std()
+
+        cohen_d = (observed_diffs[metric] - null_mean) / null_std if null_std > 0 else np.nan
+        effect_sizes[metric] = cohen_d
+
+        if direction == "greater":
+            # quantile method:
+            #threshold = np.percentile(null_diffs[metric], 95)
+            #p_values[metric] = np.mean(observed_diff[metric] > threshold)
+            # proportional method:
+            p_values[metric] = (null_diffs[metric] >= observed_diffs[metric]).mean()
+        elif direction == "less":
+            # quantile method:
+            #threshold = np.percentile(null_diffs[metric], 5)
+            #p_values[metric] = np.mean(observed_diff[metric] < threshold)
+            # proportional method:
+            p_values[metric] = (null_diffs[metric] <= observed_diffs[metric]).mean()
+        else:
+            raise ValueError(f"Invalid test direction for metric '{metric}': {direction}")
+
+    return observed_diffs, p_values, effect_sizes
+
+def permutation_test_SWP(data1, data2, distances, observed_metrics, n_permutations=1000, test_directions=None):
+    """
+    Perform a permutation test by randomizing group labels and computing SWP differences.
+
+    Parameters:
+    - data1, data2: Pandas DataFrames containing observations for each group. Must have a 'Group' column.
+    - n_permutations: Number of permutations to perform.
+
+    Returns:
+    - A DataFrame with metric differences for each iteration.
+    """
+    # Compute observed metrics
+    observed_diffs = observed_metrics.iloc[0, :] - observed_metrics.iloc[1, :]  # Difference: Group1 - Group2
+
+    # Store permutation results
+    null_diffs = pd.DataFrame(columns=observed_diffs.index, index=range(n_permutations))
+    combined_data = pd.concat([data1, data2])
+    group_labels = combined_data["Group"].unique()
+    group1_label, group2_label = group_labels
+
+    for i in range(n_permutations):
+        # Shuffle group labels
+        permuted_data = combined_data.copy()
+        permuted_data["Group"] = np.random.permutation(permuted_data["Group"])
+
+        # Split data into groups
+        permuted_data1 = permuted_data[permuted_data['Group'] == group1_label]
+        permuted_data2 = permuted_data[permuted_data['Group'] == group2_label]
+
+        # Generate pcormats
+        pcormat1 = partial_cor(permuted_data1.iloc[:, 7:])
+        pcormat2 = partial_cor(permuted_data2.iloc[:, 7:])
+
+        # Get weight-distance combinations
+        dists1 = weight_by_dist(pcormat1, distances, plot=False)
+        dists2 = weight_by_dist(pcormat2, distances, plot=False)
+
+        # Get C_obs and L_obs for each permuted graph
+        graphs_perm = data_to_graphs(permuted_data, groupname=group2_label)
+        permuted_metrics = []  # initialise metric list
+        for graph in graphs_perm:  # for each graph and group
+            metrics = measure_net(graph)  # get the network metrics
+            permuted_metrics.append(metrics)  # add net metrics to list
+
+        permuted_metrics = pd.concat(permuted_metrics,ignore_index=True)
+        C_obs = permuted_metrics['clustering']
+        L_obs = permuted_metrics['L_obs']
+
+        # Calculate SWP and delta for each permuted dataset
+        SWP1 = SWP(pcormat1, dists1, C_obs[0], L_obs[0])
+        SWP2 = SWP(pcormat2, dists2, C_obs[1], L_obs[1])
+
+        permuted_diffs = SWP1.iloc[0, :-1] - SWP2.iloc[0, :-1]
+
+        # Store null differences
+        null_diffs.iloc[i, :] = permuted_diffs.values
+
+    # One-tailed P-values
+    p_values = {}
+    effect_sizes = {}  # Store Cohen's d
+    for metric in observed_diffs.index:
+        direction = test_directions.get(metric, "greater")  # Default to greater if not specified
+        null_distribution = null_diffs[metric].dropna()  # Drop NaNs if any
+
+        # Compute effect sizes
+        null_mean = null_distribution.mean()
+        null_std = null_distribution.std()
+
+        cohen_d = (observed_diffs[metric] - null_mean) / null_std if null_std > 0 else np.nan
+        effect_sizes[metric] = cohen_d
+
+        if direction == "greater":
+            # quantile method:
+            # threshold = np.percentile(null_diffs[metric], 95)
+            # p_values[metric] = np.mean(observed_diff[metric] > threshold)
+            # proportional method:
+            p_values[metric] = (null_diffs[metric] >= observed_diffs[metric]).mean()
+        elif direction == "less":
+            # quantile method:
+            # threshold = np.percentile(null_diffs[metric], 5)
+            # p_values[metric] = np.mean(observed_diff[metric] < threshold)
+            # proportional method:
+            p_values[metric] = (null_diffs[metric] <= observed_diffs[metric]).mean()
+        else:
+            raise ValueError(f"Invalid test direction for metric '{metric}': {direction}")
+
+    return null_diffs.mean(), observed_diffs, p_values, effect_sizes
