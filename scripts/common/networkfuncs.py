@@ -273,7 +273,7 @@ def weight_by_dist(cormat, dists, plot = True):
 
 # Function to calculate SWP and delta for a graph, given the correlation matrix and distances, and observed clustering and path length of graph in question
 # creates a distance-based lattice graph and a single random rewire for the null models
-def SWP(cormat, dists, C_obs, L_obs):
+def SWP(cormat, dists, C_obs, L_obs,report = True):
     """
     Calculate small-world propensity and delta for a graph using a distance-based lattice and single random rewire as null models
     :param cormat: a pandas DataFrame of vertex correlations
@@ -314,6 +314,7 @@ def SWP(cormat, dists, C_obs, L_obs):
 
         cormat_latt.reindex(index=cormat.index, columns=cormat.columns) # reorder matrix to match original order
 
+
     graph_latt = Graph(scipy.sparse.lil_matrix(cormat_latt), directed=False) # create lattice graph
     remove_self_loops(graph_latt) # remove self-loops
 
@@ -342,11 +343,12 @@ def SWP(cormat, dists, C_obs, L_obs):
     L_latt = calculate_path_length(graph_latt)
     L_rand = calculate_path_length(graph_rand)
 
-    print(C_latt, C_rand, L_latt, L_rand) # sanity check
+    if report:
+        print(C_latt, C_rand, L_latt, L_rand) # sanity check
 
     # calculate divergences from lattice and random models
-    delta_C = (C_latt - C_obs) / (C_latt - C_rand)
-    delta_L = (L_obs - L_rand) / (L_latt - L_rand)
+    delta_C = np.clip((C_latt - C_obs) / (C_latt - C_rand), 0, 1)
+    delta_L = np.clip((L_obs - L_rand) / (L_latt - L_rand), 0, 1)
 
     # calculate SWP
     SWP = np.sqrt((delta_C**2 + delta_L**2) / 2) # calculate SWP
@@ -526,7 +528,7 @@ def draw_graph_difference(graphs, positions, absolute_edges, output_file):
         output=output_file
     )
     
-def permutation_test_metrics(data1, data2, observed_metrics, n_permutations=1000, test_directions=None):
+def permutation_test_metrics(data1, data2, observed_metrics, sign=None, n_permutations=1000, test_directions=None):
     """
     Perform a permutation test by randomizing group labels and computing metric differences.
 
@@ -540,6 +542,8 @@ def permutation_test_metrics(data1, data2, observed_metrics, n_permutations=1000
 
     # Compute observed metrics
     observed_diffs = observed_metrics.iloc[0, :] - observed_metrics.iloc[1, :]  # Difference: Group1 - Group2
+    print('Observed differences:')
+    print(observed_diffs.to_frame().T) # print the observed difference
 
     # Store permutation results
     null_diffs = pd.DataFrame(columns=observed_diffs.index, index=range(n_permutations))
@@ -553,7 +557,16 @@ def permutation_test_metrics(data1, data2, observed_metrics, n_permutations=1000
         permuted_data["Group"] = np.random.permutation(permuted_data["Group"])
 
         # Generate graphs from permuted data
-        graphs_perm = data_to_graphs(permuted_data, groupname=group2_label)
+        # For positive or negative graphs, split by sign then take the first or second graph for each group
+        if sign == 'Positive':
+            graphs = data_to_graphs(permuted_data, groupname=group2_label, split_sign=True)
+            graphs_perm = [graphs[0][0], graphs[1][0]]
+        elif sign == 'Negative':
+            graphs = data_to_graphs(permuted_data, groupname=group2_label, split_sign=True)
+            graphs_perm = [graphs[0][1], graphs[1][1]]
+        # For absolute weights, don't split
+        elif sign is None:
+            graphs_perm = data_to_graphs(permuted_data, groupname=group2_label)
 
         # Compute metrics for permuted groups
         permuted_metrics = []  # initialise metric list
@@ -567,6 +580,9 @@ def permutation_test_metrics(data1, data2, observed_metrics, n_permutations=1000
         # Store null differences
         null_diffs.iloc[i, :] = permuted_diffs.values
 
+    print('Mean null differences:')
+    print(null_diffs.mean())
+
     # Two-tailed P-values, quantile method
     #lower_percentile = diff_df.quantile(0.025)
     #upper_percentile = diff_df.quantile(0.975)
@@ -576,8 +592,8 @@ def permutation_test_metrics(data1, data2, observed_metrics, n_permutations=1000
     # p_values = (np.abs(null_diffs) >= np.abs(observed_diffs)).mean()
 
     # One-tailed P-values
-    p_values = {}
-    effect_sizes = {}  # Store Cohen's d
+    p_values = pd.DataFrame(columns=observed_diffs.index, index=range(1)) # Store P-values
+    effect_sizes = pd.DataFrame(columns=observed_diffs.index, index=range(1))  # Store Cohen's d
     for metric in observed_diffs.index:
         direction = test_directions.get(metric, "greater")  # Default to greater if not specified
         null_distribution = null_diffs[metric].dropna()  # Drop NaNs if any
@@ -585,7 +601,6 @@ def permutation_test_metrics(data1, data2, observed_metrics, n_permutations=1000
         # Compute effect sizes
         null_mean = null_distribution.mean()
         null_std = null_distribution.std()
-
         cohen_d = (observed_diffs[metric] - null_mean) / null_std if null_std > 0 else np.nan
         effect_sizes[metric] = cohen_d
 
@@ -604,9 +619,14 @@ def permutation_test_metrics(data1, data2, observed_metrics, n_permutations=1000
         else:
             raise ValueError(f"Invalid test direction for metric '{metric}': {direction}")
 
-    return observed_diffs, p_values, effect_sizes
+    print('P-values:')
+    print(p_values)
+    print('Effect sizes:')
+    print(effect_sizes)
 
-def permutation_test_SWP(data1, data2, distances, observed_metrics, n_permutations=1000, test_directions=None):
+    return p_values, effect_sizes
+
+def permutation_test_SWP(data1, data2, distances, observed_metrics, sign=None, n_permutations=1000, test_directions=None):
     """
     Perform a permutation test by randomizing group labels and computing SWP differences.
 
@@ -619,6 +639,8 @@ def permutation_test_SWP(data1, data2, distances, observed_metrics, n_permutatio
     """
     # Compute observed metrics
     observed_diffs = observed_metrics.iloc[0, :] - observed_metrics.iloc[1, :]  # Difference: Group1 - Group2
+    print('Observed differences:')
+    print(observed_diffs.to_frame().T) # print the observed difference
 
     # Store permutation results
     null_diffs = pd.DataFrame(columns=observed_diffs.index, index=range(n_permutations))
@@ -635,16 +657,40 @@ def permutation_test_SWP(data1, data2, distances, observed_metrics, n_permutatio
         permuted_data1 = permuted_data[permuted_data['Group'] == group1_label]
         permuted_data2 = permuted_data[permuted_data['Group'] == group2_label]
 
-        # Generate pcormats
-        pcormat1 = partial_cor(permuted_data1.iloc[:, 7:])
-        pcormat2 = partial_cor(permuted_data2.iloc[:, 7:])
-
-        # Get weight-distance combinations
-        dists1 = weight_by_dist(pcormat1, distances, plot=False)
-        dists2 = weight_by_dist(pcormat2, distances, plot=False)
+        # Generate graphs from permuted data
+        # For positive or negative graphs, split by sign then take the first or second graph for each group
+        if sign == 'Positive':
+            # Generate positive pcormats
+            pcormat1 = partial_cor(permuted_data1.iloc[:, 7:], absolute=False).clip(lower = 0)
+            pcormat2 = partial_cor(permuted_data2.iloc[:, 7:], absolute=False).clip(lower = 0)
+            # Get weight-distance combinations
+            dists1 = weight_by_dist(pcormat1, distances, plot=False)
+            dists2 = weight_by_dist(pcormat2, distances, plot=False)
+            # Generate graphs
+            graphs = data_to_graphs(permuted_data, groupname=group2_label, split_sign=True)
+            graphs_perm = [graphs[0][0], graphs[1][0]] # select positive graphs
+        elif sign == 'Negative':
+            # Generate negative pcormats
+            pcormat1 = abs(partial_cor(permuted_data1.iloc[:, 7:], absolute=False).clip(upper = 0))
+            pcormat2 = abs(partial_cor(permuted_data2.iloc[:, 7:], absolute=False).clip(upper = 0))
+            # Get weight-distance combinations
+            dists1 = weight_by_dist(pcormat1, distances, plot=False)
+            dists2 = weight_by_dist(pcormat2, distances, plot=False)
+            # Generate graphs
+            graphs = data_to_graphs(permuted_data, groupname=group2_label, split_sign=True)
+            graphs_perm = [graphs[0][1], graphs[1][1]]
+        # For absolute weights, don't split
+        elif sign is None:
+            # Generate absolute pcormats
+            pcormat1 = partial_cor(permuted_data1.iloc[:, 7:])
+            pcormat2 = partial_cor(permuted_data2.iloc[:, 7:])
+            # Get weight-distance combinations
+            dists1 = weight_by_dist(pcormat1, distances, plot=False)
+            dists2 = weight_by_dist(pcormat2, distances, plot=False)
+            # Generate graphs
+            graphs_perm = data_to_graphs(permuted_data, groupname=group2_label)
 
         # Get C_obs and L_obs for each permuted graph
-        graphs_perm = data_to_graphs(permuted_data, groupname=group2_label)
         permuted_metrics = []  # initialise metric list
         for graph in graphs_perm:  # for each graph and group
             metrics = measure_net(graph)  # get the network metrics
@@ -655,17 +701,20 @@ def permutation_test_SWP(data1, data2, distances, observed_metrics, n_permutatio
         L_obs = permuted_metrics['L_obs']
 
         # Calculate SWP and delta for each permuted dataset
-        SWP1 = SWP(pcormat1, dists1, C_obs[0], L_obs[0])
-        SWP2 = SWP(pcormat2, dists2, C_obs[1], L_obs[1])
+        SWP1 = SWP(pcormat1, dists1, C_obs[0], L_obs[0], report=False)
+        SWP2 = SWP(pcormat2, dists2, C_obs[1], L_obs[1], report=False)
 
-        permuted_diffs = SWP1.iloc[0, :-1] - SWP2.iloc[0, :-1]
+        permuted_diffs = SWP1 - SWP2
 
         # Store null differences
         null_diffs.iloc[i, :] = permuted_diffs.values
 
+    print('Mean null differences:')
+    print(null_diffs.mean())
+
     # One-tailed P-values
-    p_values = {}
-    effect_sizes = {}  # Store Cohen's d
+    p_values = pd.DataFrame(columns=observed_diffs.index, index=range(1)) # Store P-values
+    effect_sizes = pd.DataFrame(columns=observed_diffs.index, index=range(1))  # Store Cohen's d
     for metric in observed_diffs.index:
         direction = test_directions.get(metric, "greater")  # Default to greater if not specified
         null_distribution = null_diffs[metric].dropna()  # Drop NaNs if any
@@ -692,4 +741,9 @@ def permutation_test_SWP(data1, data2, distances, observed_metrics, n_permutatio
         else:
             raise ValueError(f"Invalid test direction for metric '{metric}': {direction}")
 
-    return null_diffs.mean(), observed_diffs, p_values, effect_sizes
+    print('P-values:')
+    print(p_values)
+    print('Effect sizes:')
+    print(effect_sizes)
+
+    return p_values, effect_sizes
