@@ -12,7 +12,7 @@ params:
 This is a notebook to perform hierarchical clustering of partial correlations between HCP parcels. The purpose of this approach is to reduce the number of nodes to below 100 so we can use partial correlations to form networks for a synesthete sample of n = 102 participants. In general, clustering will be performed on partial correlations of left-right averaged data from the control sample of n = 650 participants. However, we will run diagnostics on the clusters, including examining consistency between multiple resamples of n = 300 controls. Partial correlations will be clustered using Euclidean distance as a measure of distance between parcels:
 
 $$ d(p,q) =  \sqrt{\sum_{i=1}^{n}{(q_i-p_i)^2}}$$
-Once an optimal clustering is found via diagnostic measures, we will summarise the results within clusters before exporting the results for network analysis with python.
+Once an optimal clustering is found via diagnostic measures, we will summarise the results within clusters and export the results for network analysis with python. We will then report the results of this and other analysis in this notebook so that everything is in one place.
 
 ```{r load_packages, include=F}
 # Load packages #
@@ -35,445 +35,154 @@ library(MVN)
 library(effectsize)
 ```
 
-```{r functions, include=F}
-
-# Define functions #
-
-# Function to normalise a range of numbers to 0-1
-normalise = function(x) (x - min(x, na.rm = T)) / (max(x, na.rm = T) - min(x, na.rm = T))
-
-# Function to average data across left and right parcels
-lr_average = function(data){ #
-  parcel_data = data[,grepl(pattern='^[L,R]_', x=colnames(data))] 
-  parcels_LR = unique(sub("^[LR]_", "", colnames(parcel_data))) 
-  data_lr = list() 
-  for (parcel in parcels_LR) {
-    l_col = paste0("L_", parcel)
-    r_col = paste0("R_", parcel)
-    data_lr[[parcel]] = rowMeans(parcel_data[, c(l_col, r_col)], na.rm = TRUE) 
-  }
-  data_lr = as.data.frame(data_lr) 
-  data_lr = cbind(data[,!grepl(pattern='^[L,R]_', x=colnames(data))], data_lr) 
-  colnames(data_lr) = gsub(x = colnames(data_lr), pattern = '^X', replacement = '') 
-  return(data_lr)
-}
-
-pcorsolve = function(data){
-  covmat = cov(data)
-  premat = solve(covmat)
-  D = sqrt(diag(premat))
-  partial_corr = (-premat / (D %o% D))
-  return(partial_corr)
-}
-
-
-# Function to test for multivariate normality
-MVN_test = function(data){
-  # mahalanobis distance plot
-  mu = colMeans(data)
-  sigma = cov(data)
-  mdist = mahalanobis(data, mu, sigma)
-  qqplot(qchisq(ppoints(nrow(data)), df = ncol(data)), mdist, 
-       main="Q-Q Plot of Mahalanobis Distances",
-       xlab = 'chi-square distribution',
-       ylab = 'Mahalanobis distance')
-  abline(0, 1, col="red")
-
-  # mvn tests
-  print(mvn(data, mvnTest = "mardia")[["multivariateNormality"]])
-  print(mvn(data, mvnTest = "hz")[["multivariateNormality"]])
-  print(mvn(data, mvnTest = "royston")[["multivariateNormality"]])
-}
-
-# Function to perform hierarchical cluster and plot dendrogram
-hclust.plot = function(data, group, clust_method, cut = 2, clustn, plot_tree = T){
- 
-  # generate correlation matrix - partial pearson
-  cormat = pcor(x = data[data$Group == group, 8:ncol(data)],
-           method = 'pearson')$estimate
-  
-  # euclidean distance, can account for positive and negative correlations    
-  distance = dist(cormat, method = 'euclidean')
-  # 'single' to do single linkage, 'ward.D' to do Ward's method
-  clust = hclust(distance, method = clust_method) 
-  
-  # plot dendrogram
-  if (plot_tree == T){
-  dend = as.dendrogram(clust) # convert to dendrogram
-  dend %>% 
-    set('branches_k_color', viridis(clustn), k = clustn) %>% # colour branches by cluster
-    set('branches_lwd', 1.8) %>% # set linewidth
-    set('labels_cex', 0.15) %>% # set label size
-    plot(main = paste0(clustn,' clusters of 180 parcels')) # plot with title
-  }
-  
-  # reorder original cormat to match clustering order and re-generate clustering
-  cormat = cormat[clust$order, clust$order] # reorder
-  distance = dist(cormat, method = 'euclidean') 
-  clust = hclust(distance, method = clust_method)
-  
-  # acquire cluster identities
-  # specify cluster number for single linkage
-  if (clust_method == 'single'){
-    clusters = stats::cutree(clust, k = clustn)
-  }
-  # wrdify cut level for Ward's method
-  if (clust_method == 'ward.D'){
-    clusters = stats::cutree(clust, h = cut) 
-  }
-  
-  # create dataframe
-  clusters = data.frame(Area = names(clusters), cluster = clusters)
-  
-  # return the cluster assignments and the distance matrix for diagnostics
-  return(list(clusters, distance))
-} 
-
-# Function to find the statistical mode
-Mode <- function(x) {
-  ux <- unique(x)
-  ux[which.max(tabulate(match(x, ux)))]
-}
-
-# Function to summarise data within clusters for both controls and synesthetes
-summarise_clusters = function(data, clusters){ 
-  # convert parcel data to long form for merging
-  data_long = melt(data[,c(1,8:ncol(data))]) 
-  # rename columns to ensure correct merge
-  colnames(data_long) = c('ID', 'Area', 'value') 
-  # merge data with the cluster assignments
-  data_long = merge(data_long, clusters, by = 'Area')
-  
-  # summarise within clusters - sum and mean of parcel statistic, plus mean of 2D coordinates and broad region
-  data_summarised = data_long %>% 
-    group_by(ID, cluster) %>%
-    summarise(sum_value = sum(value),
-              mean_value = mean(value), 
-              x = mean(x), 
-              y = mean(y),
-              Region = first(Region)) 
-  
-  # convert back to wide form and bind with metadata
-  data_wide_sum = dcast(data_summarised, ID ~ cluster, value.var = 'sum_value')
-  data_wide_sum = merge(data[,1:7], data_wide_sum, by = 'ID')
-  data_wide_mean = dcast(data_summarised, ID ~ cluster, value.var = 'mean_value')
-  data_wide_mean = merge(data[,1:7], data_wide_mean, by = 'ID')
-  
-  # separately get the centroids of x and y positions for cluster positions
-  data_pos = unique(dplyr::select(ungroup(data_summarised), 2,5,6,7)) # select cluster column, mean x and mean y columns
-  
-  # return the summed values, mean values and cluster positions for plotting
-  return(list(data_wide_sum, data_wide_mean, data_pos))
-}
-
-# Function to iterate through a desired clustering cutoff and report diagnostics
-optimal_cluster = function(data, clust_method, cut_values, seed){
-  # get lr-averaged data from full data
-  data_lr = lr_average(data)
-  
-  # initialise diagnostic scores
-  mean_silhouettes = vector()
-  dunn_indices = vector()
-  lr_aris = vector()
-  resample_mean_aris = vector()
-  cluster_number = vector()
-
-  # iterate through cutoff values
-  for (i in seq_along(cut_values)){
-    # set cluster number if single linkage approach, otherwise leave at 1
-    if (clust_method == 'single'){
-    clustn = cut_values[i]
-    }
-    else {
-      clustn = 1
-    }
-    
-    # perform clustering
-    clustering = hclust.plot(data_lr, group = 'Control', clust_method = clust_method, 
-                             cut = cut_values[i], clustn = clustn, plot_tree = F)
-  
-    # internal metrics - silhouette scores and Dunn indices
-    sil_scores = silhouette(x = as.integer(clustering[[1]]$cluster), dist = clustering[[2]])
-    mean_silhouettes[i] = mean(sil_scores[,"sil_width"]) 
-    dunn_indices[i] = dunn(distance =clustering[[2]], clusters = as.integer(clustering[[1]]$cluster))
-  
-    # external consistency - adjusted Rand index for clustering of left vs right
-    set.seed(seed)
-    data_l = cbind(data[,1:7], data[,grep(x = colnames(data), pattern = '^L_')])
-    clustering_l = hclust.plot(data_l, group = 'Control',  clust_method = clust_method, 
-                                     clustn = clustn, cut = cut_values[i], plot_tree = F)
-    data_r = cbind(data[,1:7], data[,grep(x = colnames(data), pattern = '^R_')])
-    clustering_r = hclust.plot(data_r, group = 'Control', clust_method = clust_method, 
-                                     clustn = clustn, cut = cut_values[i], plot_tree = F)  
-    lr_aris[i] = adjustedRandIndex(clustering_l[[1]]$cluster, clustering_r[[1]]$cluster) 
-  
-    # external consistency - adjusted Rand index for 20 resamples of 325 participants
-    # 20 samples of 325 w/o replacement guarantees < .1% chance of missing any observation
-    clustering_resamp = list()
-    set.seed(seed)
-    for (j in seq(1:20)){ 
-      # take resamples and cluster
-      data_lr_resamp = data_lr[data_lr$Group == 'Control',][sample(1:650, size = 350, replace = F),] 
-      clustering_resamp[[j]] = hclust.plot(data_lr_resamp, group = 'Control', clust_method = clust_method, 
-                                           clustn = clustn, cut = cut_values[i], plot_tree = F)
-    }
-    # get adjusted Rand index for every combination of the 10 clusterings
-    clustering_resamp_ari = vector() 
-    for (j in 1:ncol(combn(20,2))){ 
-      resamp1 = clustering_resamp[[combn(20,2)[,j][1]]][[1]]
-      resamp2 = clustering_resamp[[combn(20,2)[,j][2]]][[1]]
-      clustering_resamp_ari[j] = adjustedRandIndex(resamp1[order(resamp1$Area),]$cluster,
-                                                resamp2[order(resamp2$Area),]$cluster)
-    }
-    # then get the mean ARI
-    resample_mean_aris[i] = mean(clustering_resamp_ari)
-    
-    # get the cluster number
-    cluster_number[i] = length(unique(clustering[[1]]$cluster))
-
-  }
-  # normalise the scores
-  mean_silhouettes_n = normalise(mean_silhouettes)
-  dunn_indices_n = normalise(dunn_indices)
-  lr_aris_n = normalise(lr_aris)
-  resample_mean_aris_n = normalise(resample_mean_aris)
-  
-  # aggregate scores and find the optimal clustering
-  agg_score = (mean_silhouettes_n + dunn_indices_n + lr_aris_n + resample_mean_aris_n)
-  optimal_cut = cut_values[which(agg_score == max(agg_score, na.rm = T))]
-  optimal_cluster_number = cluster_number[which(agg_score == max(agg_score, na.rm = T))]
-  
-  # return the recommended cut and the table of scores
-  return(list(optimal_cut, agg_score, optimal_cluster_number))
-}
-
-# Function to calculate and plot partial correlation distributions according to a grouping variable
-plot_pcors = function(data_list, nclust, group_vec, colours = c('blue', 'red')){
-  # generate partial correlations
-  pcor_list = lapply(data_list, FUN = function(df){pcor(df[,8:ncol(df)])$estimate})
-  # melt to long form
-  pcor_list = lapply(pcor_list, FUN = function(df){df = melt(df)})
-  # add desired grouping variable
-  for (i in 1:length(pcor_list)){
-    pcor_list[[i]]$Group = group_vec[i]
-  }
-  # bind into one dataframe
-  pcors = bind_rows(pcor_list, .id = 'Sample')
-  
-  # plot partial correlation distributions
-  pcors$Group = factor(pcors$Group, levels = unique(group_vec))
-  pcors$Sample = factor(pcors$Sample)
-  ggplot(data = pcors, aes(x = value, color = Group, group = Sample))+ 
-    geom_density(lwd = 1.05)+
-    scale_color_manual(values = colours)+
-    labs(x = 'Partial correlation', y = 'Density')+
-    theme(legend.position = 'top')
-}
-
-# Function to generate copula and produce sample data
-sampleCopula = function(data, log = F, 
-                        copulatype = c('gaussian', 'empirical', 't', 'vine'), invert = c('gaussian', 'empirical'),
-                        n = 102, n_samp = 10){
-  
-  # initialise results
-  copula_res = list()
-  
-  # filter out metadata
-  metadata = data[,1:7]
-  data = data[,8:ncol(data)]
-  
-  # log-transform data if desired
-  if (log == T) {data = log(data)}
-  
-  # get pseudo-observations (empirical data transformed to uniform distribution)
-  pseudoobs = pobs(data) 
-  
-  # generate copula
-  # unstructured gaussian copula
-  if (copulatype == 'gaussian'){
-    #empirical_cor = cor(qnorm(pseudoobs), method = "pearson") # for ml methods (too slow)
-    #start_values = empirical_cor[lower.tri(empirical_cor)]
-    copula_norm = normalCopula(dim = ncol(data), dispstr = 'un')
-    copula_fit = fitCopula(copula_norm, pseudoobs, method = "irho")
-    copula = copula_fit@copula
-  }
-  # empirical copula
-  if (copulatype == 'empirical'){
-    copula = empCopula(pseudoobs, smoothing = 'none')
-  }
-  # t-copula
-  if (copulatype == 't'){
-    copula_t = tCopula(dim = ncol(data))
-    copula_fit = fitCopula(copula_t, pseudoobs)
-    copula = copula_fit@copula
-  }
-  if (copulatype == 'vine'){
-    # VineCopula package:
-    # copula = RVineStructureSelect(pseudoobs, familyset = c(1,2,)) 
-    # rvinecopulib package
-    copula = vinecop(pseudoobs, family_set = c("elliptical"), cores = 3)
-  }
-  
-  # get samples from copula
-  copula_samples = list()
-  for (i in 1:n_samp){
-    if (copulatype == 'vine'){
-      # VineCopula package:
-      #copula_samples[[i]] = RVineSim(n, copula)
-      # rvinecopulib package:
-      copula_samples[[i]] = rvinecop(n, copula)
-    }
-    else{
-    copula_samples[[i]] = rCopula(n, copula)
-    }
-  
-    # invert copula samples
-    # inversion with gaussian cdf
-    if (invert == 'gaussian'){
-      samples = matrix(0, nrow = nrow(copula_samples[[i]]), ncol = ncol(copula_samples[[i]]))
-      for (j in 1:ncol(copula_samples[[i]])) {
-        samples[,j] = qnorm(copula_samples[[i]][,j], mean = mean(data[,j]), sd = sd(data[,j]))
-      }
-    }
-    # inversion with empirical cdf
-    if (invert == 'empirical'){
-      samples = list()
-      for (j in 1:ncol(copula_samples[[i]])){
-        ecdf_col = ecdf(data[,j]) 
-        inv_ecdf = approxfun(ecdf_col(as.matrix(data)[,j]), as.matrix(data)[,j], method = "linear", rule = 2) 
-        samples[[paste0("Cluster", j)]] = inv_ecdf(copula_samples[[i]][,j])
-      }
-      samples = do.call(cbind, samples)
-    }
-    # no inversion - uniform samples
-    if (invert == 'none'){
-      samples = copula_samples[[i]]
-    }
-    
-    # compile samples
-    results = list()
-    results[[1]] = samples
-    if (log == T){results[[1]] = exp(results[[1]])}
-    results[[1]] = cbind(metadata, results[[1]])
-    results[[2]] = mean(abs(cor(samples, method = 'pearson') - cor(data, method = 'pearson')))
-    names(results) = c('copula_samples', 'cor_error')
-
-    copula_res[[i]] = results
-    
-  }
-  
-  return(copula_res)
-  
-}
-
-# Function to calculate graph complexity based on pairwise Jensen-Shannon divergence
-js_complexity = function(data, group, randomise = F) {
-  # Helper functions
-  normalize = function(x) { # normalise distributions to sum to 1
-    total = sum(x)
-    if (total == 0) return(rep(1 / length(x), length(x)))  # Handle zero-sum case
-    return(x / total)
-  }
-  kl_divergence = function(P, Q) { # Kullback-Leibler divergence
-    nonzero = P > 0 # to avoid logging 0
-    sum(P[nonzero] * log2(P[nonzero] / Q[nonzero]))
-  }
-  js_divergence = function(P, Q) { # Jensen-Shannon divergence
-    M = 0.5 * (P + Q)
-    0.5 * kl_divergence(P, M) + 0.5 * kl_divergence(Q, M)
-  }
-  
-  # Wrangle data
-  data = data[data$Group == group, 8:ncol(data)] # get desired group and variables
-  edge_weights = pcorsolve(data) # get partial correlations
-  if (randomise == T){ # if we want to randomly reorganise graph
-    set.seed(params$seed)
-    shuffled_weights = sample(as.vector(edge_weights)) # randomly shuffle edge weights
-    edge_weights = matrix(shuffled_weights, nrow = nrow(edge_weights)) # put back into adjacency matrix
-  }
-  edge_weights = abs(edge_weights) # get absolute partial correlations
-  prob_matrix = t(apply(edge_weights, 1, normalize)) # normalise distributions
-  
-  
-  # Get JS divergence between every vertex
-  n = nrow(prob_matrix)
-  js_matrix = matrix(0, n, n)
-  for (i in 1:(n - 1)) {
-    for (j in (i + 1):n) {
-      js_val = js_divergence(prob_matrix[i, ], prob_matrix[j, ])
-      js_matrix[i, j] = js_val
-      js_matrix[j, i] = js_val
-    }
-  }
-  
-  # Get mean vertex- and graph-wise divergences
-  vertex_means = rowMeans(js_matrix)
-  total_js = mean(js_matrix)
-
-  return(list(
-    js_matrix = js_matrix,
-    vertex_means = vertex_means,
-    total_js = total_js
-  ))
-}
-
-```
-
 ```{r load_data, include=F}
-# Read in data and set paths for saving #
+# Read in data, functions, and set paths for saving #
+
 datapath =  'D:/Documents/Academia/projects/ward_lab/MRI_analysis/datasets/synesthesia_100brains/'
 savepath_data = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/shared/synesthesia_100brains/surface_area/'
 savepath_outputs = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/outputs/synesthesia_100brains/surface_area/R/'
+source("D:/Documents/Academia/projects/ward_lab/MRI_analysis/scripts/common/R_custom_functions.R") 
 SA_abs = read.csv(paste0(datapath, '/surface_area/biomarker_S1C_harm.csv'), row.names = 1)
 SA_rel = read.csv(paste0(datapath, '/surface_area/biomarker_S1A_harm.csv'), row.names = 1)
 parcel_positions = read.csv(paste0(datapath, '/common/parcel_positions_flat.csv'))
-SA_abs_lr = lr_average(SA_abs)
 ```
 
-# Ward's clustering
+```{r set_parameters, include=F}
+# Set parameters to be used throughout notebook --- change for customisation #
 
-For hierarchical clustering, we will use Ward's method, since it is known to form spherical clusters and well accommodate outliers. This method forms clusters by minimising the within cluster variance.
+# Set data to be used
+data = SA_abs  # primary data
+data_lr = lr_average(data)  # left-right averaged data
 
-To obtain a specific clustering here, we have to choose a value which specifies where the clustering will be cut. Nodes separated below this value will be in the same cluster, while nodes separated above this value will be in different clusters. We will iterate across some cutoff values which are known (via prior testing) to generate less than 100 clusters but more than 1 cluster. We iterate in steps of 0.01 which will produce a small change in the cluster number in most cases.
+# Set group structure
+exp_group = 'Syn'  # name of experimental group
+sample_n = 102  # number of observations per group
 
-Additionally, because the process of finding the optimal cluster depends to some degree on random subsampling of control data, we will iterate the process over 10 random seeds to see if there is a stable optimal cluster number. The code below will perform this iteration to find the optimal cutoff value and the number of clusters associated with it.
+# Set indexes for data vs metadata columns
+data_cols = 8:ncol(data)  # columns with data
+data_cols_lr = 8:ncol(data_lr)  # columns with lr-averaged data
+metadata_cols = 1:7  # columns with metadata
+
+# Set paths to data and save locations
+project_path = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/'  # path to main project folder
+datapath = paste0(project_path, 'datasets/synesthesia_100brains/')  # path to primary data
+savepath_data = paste0(project_path, 'shared/synesthesia_100brains/surface_area/')  # path to save data 
+savepath_outputs = paste0(project_path, 'outputs/synesthesia_100brains/surface_area/R/')  # path to save figures etc.
+python_imports = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/outputs/synesthesia_100brains/surface_area/python/'  # outputs from python
+```
+
+# Initial checks
+
+Prior to beginning the clustering procedure, we need to check that all assumptions of our intended approach are met. 
+
+
+## Data normality
+
+Ultimately, we are interested in using partial correlations to form networks that accurately describe the structural relationships between a set of regions of the brain. However, this description is only fully accurate under a gaussian assumption; i.e.: partial correlations will only capture the full dependence structure of the data if it follows a multivariate normal distribution. Since we will be carrying out clustering on partial correlations observed in control data, we want to see if the data follows a multivariate normal distribution, and so is well described by the partial correlations in the first instance. To test this, we will implement a series of tests for multivariate normality.
+
+
+```{r lr_MVN_tests}
+# MVN tests for lr-averaged control data #
+
+MVN_test(data_lr[data_lr$Group == 'Control', data_cols_lr])
+```
+
+While the tests are not in complete agreement of an MVN distribution, the Mahalanobis distance plot indicates that an MVN assumption is not inappropriate. The results here are likely affected by both the large number of dimensions (n = 180) and the large number of samples for each dimension (n = 650). This means it is easier for the data to fail normality tests. We can check the univariate normality to see how many individual variables differ from normality.
+
+```{r univariate_normality}
+# Per-parcel normality tests #
+
+table(mvn(data_lr[, -metadata_cols])
+      [['univariateNormality']]$Normality)
+```
+
+Indeed, we see that while most (92%) of the per-parcel data are normally distributed, only a small number are not. Therefore, we can assume multivariate normality and that partial correlations will capture the majority of the dependence structure of the data.
+
+
+## Group differences in parcel morphology
+
+One other concern is whether there are group differences in the features of some parcels. While additive differences don't affect correlation structure, if there is a multiplicative difference in a parcel feature between groups, this could result in a correlational difference with other parcels. This then would be a trivial finding, since it wouldn't reflect regional co-growth, but rather a difference in a single region's growth pattern. To test for this, we can carry out F-tests of variance for each parcel. Since it would also be interesting to see average parcel surface areas differ between groups, we can also fit linear models to compare means.
+
+```{r group_parcel_variance}
+# Compare parcel variances and means between groups #
+
+# Run F-tests for variance
+test_summaries = list()  
+for (region in colnames(data_lr[, data_cols_lr])) { 
+  res = var.test(data_lr[[region]][data_lr$Group == 'Control'], 
+                 data_lr[[region]][data_lr$Group == exp_group])  
+  test_summaries[[region]] = res
+}
+sig_results = lapply(test_summaries, function(x) x$p.value[x$p.value < 0.05])
+print(sig_results[sapply(sig_results, length) > 0])
+
+# Fit linear model for each area
+model_summaries = list()
+for (region in colnames(data_lr[, data_cols_lr])) { 
+  model = lm(data_lr[[region]] ~ Group, data = data_lr)  
+  model_summaries[[region]] = summary(model)
+}
+p_vals = sapply(model_summaries, FUN = function(list){ 
+  list[["coefficients"]][2,4] 
+})
+print(p_vals[p_vals < 0.05])
+```
+
+For variance, only 5 (2.8%) of parcels show a group difference. This is below 5% as so these would likely not show differences under multiple comparison correction. For the means, 62 (34.4%) of parcels do show a difference in means. While this won't affect the magnitude of pearson correlations, it is worth noting for future analysis. 
+
+
+
+# Hierarchical clustering optimisation
+
+Now that we have validated the main assumptions of our approach, we can employ hierarchical clustering to find reduce down the number of network nodes. For the clustering algorithm, we will use Ward's method, since it is known to form spherical clusters and well accommodate outliers. This method forms clusters by minimising the within cluster variance.
+
+While HC is deterministic, a clustering has to be specified by separating variables at a given level - i.e., where to cut the clustering tree. Nodes separated below this cut value will be in the same cluster, while nodes separated above this value will be in different clusters. While there is no perfect way to do this, we can employ various metrics that measure the tightness of clusters, as well as some that measure the cluster consistency under different perturbations such as resamples. Our optimisation process here will involve iterating across cutoff values which are known (from prior testing) to generate less than 100 clusters but more than 1 cluster. We iterate in steps of 0.01 which will produce a small change in the cluster number in most cases. At each step, the metrics will be combined into a normalised score which indicates the quality of each clustering. Because the process of finding the optimal cluster depends to some degree on random sampling of control data, we will iterate the process over 10 random seeds to see if there is a stable optimal cluster number. 
 
 
 ```{r ward_clustering_optimisation, message=F, warning=F, cache=T}
-# Set random seeds
+# Iterate over clusterings and find optimal number #
+
+# Set random seeds for resampling
 seeds = c(674345, 811071, 276503, 411732, 475378, 
           690070, 425943, 729736, 621889, 660812)
-# Set cutoff values to test
+
+# Set cutoff values to test --- change if needed
 cut_values = seq(from = 1.40, to = 2.50, by = 0.01)
-# Initialise results
-clust_wrd_clustns = vector()
-clust_wrd_cuts = vector()
-# Iterate over the 10 seeds
-for (i in 1:10){
-  clust_wrd_optimum = optimal_cluster(data = SA_abs, 
-                clust_method = 'ward.D', 
-                cut_values = cut_values, 
+
+# Iterate optimisation over the 10 seeds
+hc_clustns = vector() 
+hc_cuts = vector()
+for (i in 1:10){  # for each seed
+  hc_optimum = optimal_cluster(data = data, 
+                clust_method = 'ward.D',
+                cut_values = cut_values,
                 seed = seeds[i])
-  clust_wrd_clustns[i] = clust_wrd_optimum[[3]]
-  clust_wrd_cuts[i] = clust_wrd_optimum[[1]]
+  hc_clustns[i] = hc_optimum[[3]] 
+  hc_cuts[i] = hc_optimum[[1]]
 }
-clustn = Mode(clust_wrd_clustns)
-cut = Mode(clust_wrd_cuts)
-print(paste0('Optimal cluster numbers: ', clust_wrd_clustns))
+
+# Get consensus clustering
+clustn = Mode(hc_clustns) 
+cut = Mode(hc_cuts)
+print(paste0('Optimal cluster numbers: ', hc_clustns))
 print(paste0('Consensus cluster number = ', clustn))
 ```
 
-It seems here the optimal number of clusters is `r print(clustn)`, which is an appropriate number for a network analysis. Let's reform the clustering, and plot the dendrogram and the cluster locations on the 2D flattened cortical sheet:
+It seems here the optimal number of clusters is `r print(clustn)`, which is an appropriate number for a network analysis. 
+
+To see how these clusters are structured, we will now re-generate this clustering using the control data, and plot the dendrogram and the cluster locations on the 2D flattened cortical sheet.
 
 ```{r cluster_locations}
-# Form optimal clusters and plot dendrogram
-clust_wrd = hclust.plot(SA_abs_lr, group = 'Control', clust_method = 'ward.D', 
+# Form optimal clusters and plot dendrogram #
+
+# Re-run clustering with suggested clusters
+hc = hclust.plot(data_lr, group = 'Control', clust_method = 'ward.D', 
                         cut = cut, clustn = clustn, plot_tree = T)
 
 # Plot cluster anatomical positions
-clust_wrd_pos = merge(parcel_positions, clust_wrd[[1]]) # merge with positions
-clust_wrd_pos$cluster = factor(clust_wrd_pos$cluster) # factor clusters
-ggplot(data = clust_wrd_pos, aes(x = x, y = max(y) - y, fill = cluster))+
+hc = merge(parcel_positions, hc[[1]]) # merge with 2D coordinates
+hc$cluster = factor(hc$cluster)
+ggplot(data = hc, aes(x = x, y = max(y) - y, fill = cluster))+
   geom_point(size = 0.8, shape = 21, stroke = 0.5)+
   geom_text(aes(
     label = gsub(x = cluster, pattern = 'cluster ', replacement = '')), 
@@ -483,134 +192,326 @@ ggplot(data = clust_wrd_pos, aes(x = x, y = max(y) - y, fill = cluster))+
   theme(legend.position = 'none',
         axis.text = element_blank())
 
-# Write clustering to csv
-write.csv(clust_wrd_pos, file = paste0(savepath_data, '/hclust/clust_wrd_pos.csv'))
-
+# Write clustering arrangement to .csv
+write.csv(hc, file = paste0(savepath_data, 'hclust/hc.csv'))
 ```
-The clusters seem to form according to anatomical location, with proximal parcels falling into the same cluster. The number of parcels in a cluster varies from about 1 to 6. This indicates the clustering is uncovering some anatomical structure in the data.
 
-To make sure our examination of correlations reflects simply the group differences in correlation structure, rather than differences in regional size, we want to ensure that we correct for any differences in the size of each ROI. We'll examine this first for the lr-averaged parcels, and also for the identified clusters, by fitting linear models to compare groups at each region:
+The clusters seem to form according to anatomical location, with proximal parcels falling into the same cluster. The number of parcels in a cluster varies from about 1 to 6. This indicates the clustering is uncovering some anatomical structure in the data, with proximal parcels having more similar correlations with the rest of the cortex.
 
-```{r linear_model, warning=F, message=F}
-# Create new dataframe for linear model residuals for lr-averaged parcels
-SA_abs_lr_lm = SA_abs_lr[, c('ID', 'Age', 'Sex', 'Group', 'Subgroup', 'Scan', 'Partition')]  
 
-# Fit model for each area and store result
+# Effects of covariates on cluster partial correlations
+
+Now we have a good idea of the cluster structure, we need to use the clustering to generate some group data for comparison. However, since sample size affects the calculation of correlation coefficients, we cannot compare the entire control data (n = 650) with the synaesthete group (n = 102) --- we have to reduce down the number of controls. A random selection, while unbiased, may not be the best choice since other variables such as age and sex could also affect results - and these factors are also a part of our other investigations. 
+
+To see to what degree age and sex affect correlation structure in our sample, we will generate samples of controls which differ only by one variable (e.g., male or female), but are matched for other variables. To achieve this, we will use an optimal matching approach to generate matched groups. This works by first calculating a propensity score from a logistic regression of the covariates, which describes the probability for a given individual to belong to a group. Distances between individuals in the different groups are calculated from the propensity scores, the optimal matching algorithm returns the sets of individuals which globally minimises the total sum of distances. 
+
+
+## Sex
+
+We start by looking at sex. We will first check how many of each sex we have in our control sample.
+
+```{r sex_n}
+# Check sex balance #
+
+print(paste0('Number of females = ', nrow(data[data$Sex == 1,])))
+print(paste0('Number of males = ', nrow(data[data$Sex == 2,])))
+```
+
+Since we only have 178 males, we will have to select an equal (or smaller) number of females for a 1:1 matched comparison. These should also be as close in possible in age and dataset origin. 
+
+Once we have our matched samples, let's summarise data within our set of clusters and examine the partial correlations for each. The `pcor_comp()` function returns a plot of the partial correlation distributions, and also performs a KS test for distribution shape, a t-test for means, and an F-test for variances. Note that it requires that data be split into a list, along with a grouping vector that describes the group membership of each element in the list.
+
+```{r match_sexes, message=F, warning=F}
+# Compare correlations of matched sexes #
+
+# Convert categorical variables to factors
+data$Sex = factor(data$Sex)
+data$Scan = factor(data$Scan)
+
+# Match the control data by sex
+data_cntrl = data[data$Group == 'Control',] 
+matched = matchit(Sex ~ Age + Scan, data = data_cntrl,
+                  method = "optimal", ratio = 1)
+data_sex_matched = match.data(matched)
+print(table(data_sex_matched$Sex))
+matchit_cols = (ncol(data_sex_matched)-2):ncol(data_sex_matched)
+data_sex_matched = data_sex_matched[,-matchit_cols]
+data_sex_matched = lr_average(data_sex_matched)
+
+# Summarise the matched data within the clusters
+data_sex_matched_hc = summarise_clusters(data_sex_matched, hc)
+data_sex_matched_hc = split(data_sex_matched_hc[[1]], 
+                             data_sex_matched_hc[[1]]$Sex)
+
+# Run the correlation comparison
+sex_comp = pcor_comp(data_list = data_sex_matched_hc, nclust = nclust, 
+           group_vec = c('Female', 'Male'),
+           colours = c('pink', 'cyan'))
+print(sex_comp[[1]])  # display plot
+print(sex_comp[[2]][[1]][[1]])  # display distributional tests
+pcor_diffs = sex_comp[[2]][[1]][[2]]  # get correlation differences
+table(pcor_diffs$signif) / nrow(pcor_diffs)  # summarise diffs
+```
+
+It looks like the partial correlations of males and females are broadly quite similar here, with males appearing to have some bias towards more negative correlations. The tests indicate there are no differences in the distributions; however, this does not rule out that some individual pair-wise correlations are different. Indeed, we see that around 74% of pair-wise correlations are different between the groups.
+
+
+## Age
+
+Since age is a numerical variable so is not naturally separated into groups, we will group ages into three categories: <22, 22-35, and >35 to see if there are any differences. However, because matching requires the comparison of two groups, we will have to perform pairwise comparisons.
+
+```{r match_age_groups, message=F, warning=F}
+# Compare correlations of matched age groups #
+
+# Create age groups
+data_cntrl = data[data$Group == 'Control',]
+data_cntrl$Age_group = ifelse(data_cntrl$Age < 22,
+                                'Young', 'Middle')
+data_cntrl$Age_group = ifelse(data_cntrl$Age > 35,
+                                'Old', data_cntrl$Age_group)
+data_cntrl$Age_group = factor(data_cntrl$Age_group, 
+                                levels = c('Young', 'Middle', 'Old'))
+data_cntrl$Age = data_cntrl$Age_group
+data_cntrl = data_cntrl[,-ncol(data_cntrl)] # to remove age groups column
+
+# Iterate over pairwise comparisons
+age_combos = combn(c('Young', 'Middle', 'Old'), 2)
+plots = list()
+distr_tests = list()
+pcor_diffs = list()
+for (i in 1:ncol(age_combos)){  # for each age group combination
+  matched = matchit(Age ~ Sex + Scan, 
+                    data = 
+                      # use first element of i-th age combination
+                      data_cntrl[data_cntrl$Age == age_combos[,i][1] 
+                                 # and second element of i-th age combination
+                                   | data_cntrl$Age == age_combos[,i][2],], 
+                    method = "optimal", ratio = 1)
+  data_age_matched = match.data(matched)
+  matchit_cols = (ncol(data_age_matched)-2):ncol(data_age_matched)
+  data_age_matched = data_age_matched[,-matchit_cols] 
+  data_age_matched = lr_average(data_age_matched)
+  print(table(data_age_matched$Age))
+  
+  # Summarise into clusters
+  data_age_matched_hc = summarise_clusters(data_age_matched, hc)
+  data_age_matched_hc[[1]]$Age = factor(data_age_matched_hc[[1]]$Age, 
+                                         levels = unique(age_combos[,i]))
+  data_age_matched_hc = split(data_age_matched_hc[[1]], 
+                               data_age_matched_hc[[1]]$Age)
+  
+  # Run the correlation comparison
+  result = pcor_comp(data_list = data_age_matched_hc, nclust = nclust, 
+                          group_vec = age_combos[,i],
+                          colours = c('forestgreen', 'orange'))
+  plots[[i]] = result[[1]]
+  distr_tests[[i]] = result[[2]][[1]][[1]]
+  pcor_diffs[[i]] = result[[2]][[1]][[2]]
+}
+
+# Display results
+grid.arrange(grobs = plots, ncol = 3, widths = c(3,3,3))
+print(distr_tests)
+sapply(pcor_diffs, function(x) table(x$signif) / nrow(x))
+```
+
+Some apparently bigger differences for the age groups here than for sex. The only distributional test that shows a difference is the F-test for variance for the comparison between <22 and >35 years old, which is P = 0.056. However, comparison of individual correlations shows that for comparisons with younger individuals, around 80% of correlations differ, while it is around 66% for the comparison of the middle and older groups.
+
+
+## Scan type
+
+We will check the numbers of different scan types in the data.
+
+```{r check_scan_types}
+# Check numbers of scan types #
+
+print(table(data$Scan))
+print(table(data_cntrl$Scan))
+```
+
+Unfortunately, the distribution of the different scan types is very unbalanced. While most of the individuals come from the HCP database, just a few were scanned at CISC. Furthermore, we have to note that the majority of those scanned at CISC were synaesthetes, leaving just a few CISC controls with which to compare to the HCP scans. Because partial correlations will be estimated poorly (or not at all) for groups of n < 63, it is not worth trying to compare the different scan types. However, because the data have been harmonised, we know that group differences in the raw data between scan types will be small.
+
+
+# Matching controls and synesthetes
+
+In the above analysis, we have seen that sex and age can have some subtle yet potentially important effects on correlation structure. Therefore, to generate our two groups of n = 102 for comparison, we should match controls and synaesthetes according to these covariates. We will form the matched groups and examine their correlation structure.
+
+```{r match_groups, message=F, warning=F}
+# Match controls and experimentals by sex and age #
+
+# Perform optimal matching by sex and age
+data$Group = factor(data$Group,levels = c('Control', exp_group)) 
+matched = matchit(Group ~ Sex + Age, data = data, 
+                  method = "optimal", ratio = 1)
+data_matched = match.data(matched)
+matchit_cols = (ncol(data_matched)-2):ncol(data_matched)
+data_matched = data_matched[, -matchit_cols]
+
+# Left-right average and summarise into clusters
+data_matched = lr_average(data_matched) 
+data_matched_hc = summarise_clusters(data_matched, hc)[[1]]  # 1=sums, 2=means
+
+# Check covariate balance
+print(mean(data_matched[data_matched$Group == 'Control',]$Age))
+print(mean(data_matched[data_matched$Group == exp_group,]$Age))
+
+print(table(data_matched[data_matched$Group == 'Control',]$Sex))
+print(table(data_matched[data_matched$Group == exp_group,]$Sex))
+```
+
+Due to the matching procedure, there is a good match of ages between the two groups. Although the sexes are unbalanced within each group, the relative proportions are also very similar between the groups.
+
+
+## Distribution checks
+
+Prior to comparing the groups in terms of their correlation structure, we need to ensure our distributional assumptions still hold for this matched, clustered data. As we did previously for the parcel data prior to clustering, we will check that cluster data is normally distributed, and that there are no trivial group differences in the distributions of cluster morphology.
+
+```{r matched_cluster_distributions, warning=F, message=F}
+# Compare clustered data distributions #
+
+# Normality tests for cluster-summarised control data
+MVN_test(data_matched_hc[data_matched_hc$Group == 'Control', -metadata_cols])
+table(mvn(data_matched_hc[, -metadata_cols])
+      [['univariateNormality']]$Normality)
+
+# Run F-tests for variance
+test_summaries = list()  
+for (region in colnames(data_matched_hc[, -metadata_cols])) { 
+  res = var.test(data_matched_hc[[region]][data_matched_hc$Group == 'Control'], 
+                 data_matched_hc[[region]][data_matched_hc$Group == exp_group])  
+  test_summaries[[region]] = res
+}
+sig_results = lapply(test_summaries, function(x) x$p.value[x$p.value < 0.05])
+print(sig_results[sapply(sig_results, length) > 0])
+
+# Fit linear model for each area
 model_summaries = list()
-for (region in colnames(SA_abs_lr[, 8:ncol(SA_abs_lr)])) {  
-  model = lm(SA_abs_lr[[region]] ~ Group, data = SA_abs_lr)
+for (region in colnames(data_matched_hc[, -metadata_cols])) { 
+  model = lm(data_matched_hc[[region]] ~ Group, data = data_matched_hc)  
   model_summaries[[region]] = summary(model)
-  SA_abs_lr_lm[[paste0(region)]] = residuals(model)  
 }
-
-print(head(SA_abs_lr_lm))
-
-# Check for any significant differences
-sapply(model_summaries, FUN = function(list){
-  list[["coefficients"]][2,4]
+p_vals = sapply(model_summaries, FUN = function(list){ 
+  list[["coefficients"]][2,4] 
 })
-
-#SA_abs_lr = SA_abs_lr_lm # replace data - uncomment if desired
-
-# Summarise lr data into clusters
-SA_abs_cntrl_wrd = rbind(summarise_clusters(SA_abs_lr[SA_abs_lr$Group == 'Control',], clust_wrd_pos)[[1]],
-                            summarise_clusters(SA_abs_lr[SA_abs_lr$Group == 'Syn',], clust_wrd_pos)[[1]])
-
-# Create new dataframe for linear model residuals for clusters
-SA_abs_cntrl_wrd_lm = SA_abs_cntrl_wrd[, c('ID', 'Age', 'Sex', 'Group', 'Subgroup', 'Scan', 'Partition')]
-
-# Fit model for each cluster and store result
-model_summaries = list()
-for (cluster in colnames(SA_abs_cntrl_wrd[, 8:ncol(SA_abs_cntrl_wrd)])) {  
-  model = lm(SA_abs_cntrl_wrd[[cluster]] ~ Group, data = SA_abs_cntrl_wrd)
-  model_summaries[[cluster]] = summary(model)
-  SA_abs_cntrl_wrd_lm[[paste0(region)]] = residuals(model)  
-}
-
-print(head(SA_abs_lr_lm))
-
-# Check for any significant differences
-sapply(model_summaries, FUN = function(list){
-  list[["coefficients"]][2,4]
-})
-
+print(p_vals[p_vals < 0.05])
 ```
 
-Because there are no differences in region size between the groups that exceed any variation within the groups, for either lr-averaged parcels or clusters, we can use the raw surface area data. 
+The tests for normality are similar to what we observed with the full control data. While not all the MVN tests suggest perfect multivariate normality, the Mahalanobis plot and univariate normality suggest a normality assumption is adequare, as only 15 (24.2%) clusters are suggested to be not normal.
 
-Let's summarise the data within the clusters and export it to a .csv file for analysis in python. Since we want to be able to carry out some statistical comparison with empirical data, we will perform the summarising for 6 unique subsamples of n = 102 from the control dataset of n = 650, to match the synesthete sample size. While we're here, we'll also plot the partial correlation distributions for the control subsamples and synesthetes:
+As for differences in variances, only 6 (9.7%) clusters show some difference in variance. Conversely, 17 (27.4%) clusters show a difference in means. 
 
 
-```{r cluster_unique_subsamples, warning=F, message=F}
-# Generate 6 groups of 102 random sample numbers
-set.seed(params$seed)
-sample_numbers = sample(1:650, size = 6 * 102, replace = F)
-sample_numbers = split(sample_numbers, ceiling(seq_along(sample_numbers)/102))
+## Partial correlation comparison
 
-# Sample controls, summarise within clusters and write to .csv
-SA_abs_wrd_sum_102 = list()
-for (i in seq(1:6)){
-  SA_abs_lr_cntrl_samp = 
-    SA_abs_lr[SA_abs_lr$Group == 'Control',][sample_numbers[[i]],]
-  SA_abs_wrd_sum_102[[i]] = 
-    summarise_clusters(SA_abs_lr_cntrl_samp, clust_wrd_pos)
-  write.csv(SA_abs_wrd_sum_102[[i]][[1]], 
-            file = paste0(savepath_data, 
-                          'hclust/SA_abs_wrd_sum_cntrl_samp_', i, '.csv'), 
-            row.names = F)
-}
-# Summarise clusters for synesthetes and write to .csv
-SA_abs_wrd_sum_syn = summarise_clusters(SA_abs_lr[SA_abs_lr$Group == 'Syn',], 
-                                        clust_wrd_pos)
-write.csv(SA_abs_wrd_sum_syn[[1]], 
-          file = paste0(savepath_data, 'hclust/SA_abs_wrd_sum_syn.csv'), 
-          row.names = F) 
+```{r}
+# Compare partial correlations from matched clustered data #
 
-# Write one .csv for cluster locations (parcel centroids)
-write.csv(SA_abs_wrd_sum_syn[[3]], 
-          file = paste0(savepath_data, 'hclust/SA_abs_wrd_pos.csv'), 
-          row.names = F) 
+# Perform comparisons of partial correlations
+data_matched_hc = split(data_matched_hc, data_matched_hc$Group)
+data_matched_comp = pcor_comp(data_list = data_matched_hc, nclust = nclust, 
+           group_vec = c('Control', exp_group))
+print(data_matched_comp[[1]])  # display plots
+print(data_matched_comp[[2]][[1]][[1]])  # display distribution tests
+pcor_diffs = data_matched_comp[[2]][[1]][[2]]  # get pairwise pcor differences
+print(table(pcor_diffs$signif) / nrow(pcor_diffs))  # percentage different
 
-# Compile subsamples into one list
-SA_abs_wrd_samp = lapply(SA_abs_wrd_sum_102, FUN = function(list){list[[1]]})
-SA_abs_wrd_samp[[7]] = SA_abs_wrd_sum_syn[[1]]
+# Set filenames for saving matched data --- change if needed
+data_matched_cntrl_filename = 'SA_abs_hc_cntrl_matched.csv'
+data_matched_exp_filename = 'SA_abs_hc_syn.csv'
 
-# Plot partial correlation distributions
-plot_pcors(data_list = SA_abs_wrd_samp, nclust = nclust, 
-           group_vec = c(rep('Control', 6), 'Syn'))
+
+# Write to .csv
+write.csv(data_matched_hc[[1]], 
+          file = paste0(savepath_data, 'hclust/', data_matched_cntrl_filename), 
+          row.names = F)
+write.csv(data_matched_hc[[2]], 
+          file = paste0(savepath_data, 'hclust/', data_matched_exp_filename), 
+          row.names = F)
 ```
 
 
-This has exported 6 control files and one synesthete file to the shared data folder, under 'hclust'. We'll use this data with python for further analysis. The correlation distributions would suggest that perhaps the synesthetes appear a bit more variably spread than the controls here.
+As for the group differences, we can see that both the KS test and the F test report a highly significant difference in the distributions, suggesting that there is a large difference in the spread of partial correlations. The plots indicate that the synaesthetes have a wider spread of correlations. However, there is no difference in the means, as supported by the t-test. Looking at individual correlations, we see that around 84% are different between the groups. We can also check which correlations in particular are different between groups, and which are the invariant.
 
-Let's import the results from the network analysis in python and visualise them here. 
+```{r matched_groups_cor_diffs}
+# Group differences in pairwise correlations #
 
-```{r unique_subsamples_net_metrics}
-# Import results
-net_metrics = read.csv(paste0(savepath_data, 
-                              'hclust/clust_wrd_samp_net_metrics.csv'))
-net_metrics = melt(net_metrics, id.vars = 'Group')
-net_metrics$Group = factor(net_metrics$Group, levels = c('Control', 'Syn'))
+# Top 10 ranked differences
+top_diffs = pcor_diffs[order(abs(pcor_diffs$Z_score), decreasing = T),]
+top_diffs[seq(1,20, by = 2),]$area_pair  # take every other row for duplicates
+
+# Bottom 20 ranked differences
+bot_diffs = pcor_diffs[order(abs(pcor_diffs$Z_score)),]
+bot_diffs[seq(1,20, by = 2),]$area_pair  # take every other row for duplicates
+```
+
+The major group differences in pairwise correlation strength appear to mostly be long-range connections involving frontal, temporal, and parahippocampal regions. Interestingly, the invariant connections are largely shorter-range correlations between sensory areas such as somatosensory, visual, and auditory regions.
+
+
+## Network analysis
+
+In python, we have imported the matched clustered data for basic network analysis. This process builds weighted networks from the partial correlations, and estimates metrics like the clustering coefficient and characteristic path length. Variances in these metrics are estimated from jackknife resampling, and statistical significance of group differences is estimated with permutation tests. We will import the results here for visualisation.
+
+```{r basic_network_metrics}
+# Import and visualise matched sample network metrics #
+
+# Read in results
+net_metrics = read.csv(paste0(savepath_data, 'hclust/', 
+                              'hc_matched_net_metrics.csv'))
+net_metrics_jk = read.csv(paste0(savepath_data, 'hclust/', 
+                              'hc_matched_jackknife_metrics.csv'))
+net_metrics_perm = read.csv(paste0(savepath_data, 'hclust/', 
+                              'hc_matched_net_perm.csv'))
+
+# Wrangle data
+net_metrics = melt(net_metrics, .id_vars = 'Group', variable.name = 'Metric')
+net_metrics_se = select(net_metrics_jk, 1,2,4)  # get standard error
+net_metrics = merge(net_metrics, net_metrics_se)  # merge with group metrics
+net_metrics_perm = melt(net_metrics_perm, 
+                        .id_vars = 'Stat', variable.name = 'Metric')
+pvals = net_metrics_perm[net_metrics_perm$Stat == 'P-value',]
+
+# Create p-value positions
+net_lims = net_metrics %>%
+  group_by(Metric) %>%
+  summarise(y_max = max(value+SE, na.rm = TRUE))
+
+pvals = pvals %>%
+  left_join(net_lims, by = "Metric") %>%
+  mutate(y_pos = y_max * 1.1) 
 
 # Plot results
-net_metrics$x = 1
-net_metrics[net_metrics$Group == 'Syn',]$x = 2
-net_metrics = net_metrics %>% mutate(
-    x_jittered = ifelse(Group == "Control", 1 + runif(n(), -0.1, 0.1), x))
-
-ggplot(data = net_metrics, aes(x = x, y = value, fill = Group))+
-  stat_summary(fun = mean, geom = 'col', alpha = 0.5, width = 0.8)+
-  geom_point(aes(x = x_jittered, colour = Group), 
-             shape = 21, stroke = 1, size = 2, fill = NA, show.legend = F)+
+ggplot(data = net_metrics, aes(x = Group, y = value, fill = Group))+
+  geom_col(width = 0.8, alpha = 0.5, colour = 'black', lwd = 0.8)+
+  geom_errorbar(aes(ymin = value - SE, ymax = value + SE),
+                width = 0.6, colour = 'black', lwd = 0.8)+
+  geom_segment(data = pvals,
+               aes(x = 1, xend = 2, y = y_pos, yend = y_pos),
+               inherit.aes = FALSE, lwd = 0.8) +
+  geom_text(data = pvals,
+            aes(x = 1.5, y = y_pos * 1.1, label = value),
+            inherit.aes = FALSE)+
+  
+  scale_y_continuous(expand = expansion(add = c(0,0)))+
   scale_fill_manual(values = c('blue', 'red'))+
   scale_colour_manual(values = c('blue', 'red'))+
+  coord_cartesian(clip = 'off')+
+  
+  labs(x = '', 
+       y = '',
+       title = 'Network metrics')+
+  #guides(fill = guide_legend(override.aes = list(alpha = 1)))+
+  theme_classic()+
   theme(
-    axis.title.x = element_blank(),
-    axis.text.x = element_blank(),
-    axis.ticks.x = element_blank(),
-    legend.position = 'top')+
-  guides(fill = guide_legend(override.aes = list(alpha = 1)))+
-  facet_wrap(~variable, scales = 'free_y', 
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 10, colour = 'black'),,
+    axis.line = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'none',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0)),
+    strip.background = element_blank(),
+    strip.text = element_text(margin = margin(10,0,10,0)))+
+  facet_wrap(~Metric, scales = 'free_y', 
              labeller = as_labeller(c(clustering = 'Clustering',
                                       efficiency = 'Efficiency',
                                       L_obs = 'Path length',
@@ -618,549 +519,399 @@ ggplot(data = net_metrics, aes(x = x, y = value, fill = Group))+
                                       mean_vb = 'Mean vertex betweenness')))
 ```
 
-It does appear like the synesthetes have greater clustering and efficiency, and lower characteristic path length the the control subsamples.
+We observe some fairly clear group differences in clustering coefficient, efficiency and path length, although only path length technically has a P < 0.05. No differences are seen for average betweenness. 
 
-However, in testing, the results seem to change depending on the seed we use to generate the control subsamples. This might have something to do with other variables like age, sex and scan site. Below, we will generate some matched control samples based on these three variables and compare the effects of these of the partial correlation distributions.
+## TESTING METRICS WITH NORMALISED WEIGHTS / WEIGHT-PRESERVING RANDOM MODELS - DOES TOPOLOGY MATTER? ##
 
-
-# Effects of covariates on cluster partial correlations
-
-## Sex
-
-We start by looking at sex. Let's first check how many of each sex we have in our control sample:
-
-```{r sex_n}
-print(paste0('Number of females = ', nrow(SA_abs[SA_abs$Sex == 1,])))
-print(paste0('Number of males = ', nrow(SA_abs[SA_abs$Sex == 2,])))
-```
-
-Since we only have 178 males, we will have to select an equal (or smaller) number of females for comparison. These should also be as close in possible in age and dataset origin. To achieve this we'll employ optimal matching using the MatchIt package.
-
-Once we have our matched samples, let's summarise data within our set of clusters and plot the partial correlations for each. Note that the `plot_pcors()` function requires data split into a list, along with a grouping vector that describes the group of each set of data in the list.
-
-```{r match_sexes, message=F, warning=F}
-# Convert categorical variables to factors
-SA_abs$Sex = factor(SA_abs$Sex)
-SA_abs$Scan = factor(SA_abs$Scan)
-
-# Match the control data by sex
-SA_abs_cntrl = SA_abs[SA_abs$Group == 'Control',]
-matched = matchit(Sex ~ Age + Scan, data = SA_abs_cntrl, 
-                  method = "optimal", ratio = 1)
-SA_abs_matched = match.data(matched)
-print(table(SA_abs_matched$Sex))
-
-# Remove additional columns, lr average, and summarise within clusters
-SA_abs_matched = SA_abs_matched[,-c(368:370)]
-SA_abs_matched = lr_average(SA_abs_matched)
-SA_abs_matched_clust = summarise_clusters(SA_abs_matched, clust_wrd_pos)
-SA_abs_matched_clust = split(SA_abs_matched_clust[[1]], 
-                             SA_abs_matched_clust[[1]]$Sex)
-
-# Plot partial correlation distributions
-plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, 
-           group_vec = c('Female', 'Male'),
-           colours = c('pink', 'cyan'))
-
-```
-
-It looks like males and females are broadly similar here, with males having a bit of bias towards more negative correlations.
-
-## Age
-
-Since age is a numerical variable and not suitable for plotting different groups, we will group ages into three categories: <22, 22-35, and >35 to see if there are any differences. However, because matching requires splitting into two groups, we will have to perform pairwise comparisons.
-
-```{r match_age_groups, message=F, warning=F}
-# Create age groups
-SA_abs_cntrl = SA_abs[SA_abs$Group == 'Control',]
-SA_abs_cntrl$Age_group = ifelse(SA_abs_cntrl$Age < 22, 
-                                'Young', 'Middle')
-SA_abs_cntrl$Age_group = ifelse(SA_abs_cntrl$Age > 35, 
-                                'Old', SA_abs_cntrl$Age_group)
-SA_abs_cntrl$Age_group = factor(SA_abs_cntrl$Age_group, 
-                                levels = c('Young', 'Middle', 'Old'))
-SA_abs_cntrl$Age = SA_abs_cntrl$Age_group # replace age column
-SA_abs_cntrl = SA_abs_cntrl[,-368] # remove age groups column
-
-# Iterate over pairwise comparisons
-age_combos = combn(c('Young', 'Middle', 'Old'), 2)
-plots = list()
-for (i in 1:ncol(age_combos)){
-  matched = matchit(Age ~ Sex + Scan, 
-                    data = 
-                      SA_abs_cntrl[SA_abs_cntrl$Age == age_combos[,i][1] 
-                                   | SA_abs_cntrl$Age == age_combos[,i][2],], 
-                    method = "optimal", ratio = 1)
-  SA_abs_matched = match.data(matched)
-  SA_abs_matched = SA_abs_matched[,-c(368:370)]
-  SA_abs_matched = lr_average(SA_abs_matched)
-  print(table(SA_abs_matched$Age))
-  SA_abs_matched_clust = summarise_clusters(SA_abs_matched, clust_wrd_pos)
-  SA_abs_matched_clust[[1]]$Age = factor(SA_abs_matched_clust[[1]]$Age, 
-                                         levels = unique(age_combos[,i]))
-  SA_abs_matched_clust = split(SA_abs_matched_clust[[1]], 
-                               SA_abs_matched_clust[[1]]$Age)
-  plots[[i]] = plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, 
-                          group_vec = age_combos[,i],
-                          colours = c('forestgreen', 'orange'))
-}
-
-grid.arrange(grobs = plots, ncol = 3, widths = c(3,3,3))
-```
-
-Some small differences between some of the age groups here. The differences in the spread of the distributions between comparisons is likely explained by the differences in sample sizes in each matched sample. 
-
-## Scan type
-
-Let's start by checking the numbers of different scan types in the data.
-
-```{r check_scan_types}
-# Check numbers of scan types
-print(table(SA_abs$Scan))
-```
-
-Because the 'HCP_YA_CISC' numbers are low, we will have to discard this scan type and do three pairwise comparisons. Let's implement this as we did above for the ages groups:
-
-```{r match_scan_types, message=F, warning=F}
-# Remove YA_CISC scans
-SA_abs_cntrl = SA_abs[SA_abs$Group == 'Control',]
-SA_abs_cntrl = SA_abs[SA_abs$Scan != 'HCP_YA_CISC',]
-SA_abs_cntrl$Scan = factor(SA_abs_cntrl$Scan, 
-                           levels = unique(SA_abs_cntrl$Scan))
-
-# Iterate over pairwise comparisons
-scan_combos = combn(c('HCP_YA_Database', 'HCP_DA_Database', 'HCP_DA_CISC'), 2)
-plots = list()
-for (i in 1:ncol(age_combos)){
-  matched = matchit(Scan ~ Sex + Age, 
-                    data = 
-                      SA_abs_cntrl[SA_abs_cntrl$Scan == scan_combos[,i][1] 
-                                   | SA_abs_cntrl$Scan == scan_combos[,i][2],], 
-                    method = "optimal", ratio = 1)
-  SA_abs_matched = match.data(matched)
-  SA_abs_matched = SA_abs_matched[,-c(368:370)]
-  SA_abs_matched = lr_average(SA_abs_matched)
-  print(table(SA_abs_matched$Scan))
-  SA_abs_matched_clust = summarise_clusters(SA_abs_matched, clust_wrd_pos)
-  SA_abs_matched_clust[[1]]$Scan = factor(SA_abs_matched_clust[[1]]$Scan, 
-                                         levels = unique(scan_combos[,i]))
-  SA_abs_matched_clust = split(SA_abs_matched_clust[[1]], 
-                               SA_abs_matched_clust[[1]]$Scan)
-  plots[[i]] = plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, 
-                          group_vec = scan_combos[,i],
-                          colours = c('purple', 'coral'))
-}
-
-grid.arrange(grobs = plots, ncol = 3)
-```
-
-Some differences here between the CISC data and the HCP datasets in partciular.
-
-## Matched controls and synesthetes
-
-Since all these covariates appear to affect the correlation distributions to at least some degree, let's now compare the 102 synesthetes with 102 controls matched according to these covariates. 
-
-```{r match_groups, message=F, warning=F}
-# Match controls and synesthetes by sex and age
-SA_abs$Group = factor(SA_abs$Group, levels = c('Control', 'Syn'))
-matched = matchit(Group ~ Sex + Age + Scan, data = SA_abs, 
-                  method = "optimal", ratio = 1)
-SA_abs_matched = match.data(matched)
-
-# Remove additional columns, lr average, and summarise within clusters
-SA_abs_matched = SA_abs_matched[,-c(368:370)]
-SA_abs_matched = lr_average(SA_abs_matched)
-SA_abs_matched_clust = summarise_clusters(SA_abs_matched, clust_wrd_pos)
-SA_abs_matched_clust = split(SA_abs_matched_clust[[1]], 
-                             SA_abs_matched_clust[[1]]$Group)
-
-# Plot partial correlation distributions
-plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, 
-           group_vec = c('Control', 'Syn'))
-
-# Write to python
-write.csv(SA_abs_matched_clust$Control, 
-          file = paste0(savepath_data, 
-                        'hclust/SA_abs_wrd_sum_cntrl_matched.csv'),
-          row.names = F)
-```
-
-Here we see a more obvious difference in the correlation distributions. However, since there is only a small number of CISC scans, matching by scan may be leading to some mismatches of age or sex. Let's check:
-
-```{r, check_covariates}
-print(mean(SA_abs_matched[SA_abs_matched$Group == 'Control',]$Age))
-print(mean(SA_abs_matched[SA_abs_matched$Group == 'Syn',]$Age))
-
-print(table(SA_abs_matched[SA_abs_matched$Group == 'Control',]$Sex))
-print(table(SA_abs_matched[SA_abs_matched$Group == 'Syn',]$Sex))
-```
-Indeed, there are large differences in both age and sex which are not really acceptable for a matched sample. We will have to ignore matching by scan for now to ensure matched ages and sexes. 
-
-```{r match_groups_noscan, message=F, warning=F}
-# Match controls and synesthetes by sex and age
-SA_abs$Group = factor(SA_abs$Group, levels = c('Control', 'Syn'))
-matched = matchit(Group ~ Sex + Age, data = SA_abs, 
-                  method = "optimal", ratio = 1)
-SA_abs_matched = match.data(matched)
-
-# Remove additional columns, lr average, and summarise within clusters
-SA_abs_matched = SA_abs_matched[,-c(368:370)]
-SA_abs_matched = lr_average(SA_abs_matched)
-SA_abs_matched_clust = summarise_clusters(SA_abs_matched, clust_wrd_pos)
-SA_abs_matched_clust = split(SA_abs_matched_clust[[1]], 
-                             SA_abs_matched_clust[[1]]$Group)
-
-# Plot partial correlation distributions
-plot_pcors(data_list = SA_abs_matched_clust, nclust = nclust, 
-           group_vec = c('Control', 'Syn'))
-
-# Write matched controls to csv
-write.csv(SA_abs_matched_clust$Control, 
-          file = paste0(savepath_data, 
-                        'hclust/SA_abs_wrd_sum_cntrl_matched.csv'), 
-          row.names = F)
-
-# Check covariates
-print(mean(SA_abs_matched[SA_abs_matched$Group == 'Control',]$Age))
-print(mean(SA_abs_matched[SA_abs_matched$Group == 'Syn',]$Age))
-
-print(table(SA_abs_matched[SA_abs_matched$Group == 'Control',]$Sex))
-print(table(SA_abs_matched[SA_abs_matched$Group == 'Syn',]$Sex))
-```
-
-There is now a much better match of ages between the two groups. Although the sexes are unbalanced within each group, the relative proportions are also very similar between the groups.
-
-The differences in the distribution of partial correlations also appear similar to before, with synesthetes having more variable correlations than controls. Let's write this data to .csv for analysis in python.
-
-```{r export_matches}
-# Write matched controls to csv
-write.csv(SA_abs_matched_clust$Control, 
-          file = paste0(savepath_data, 
-                        'hclust/SA_abs_wrd_sum_cntrl_matched.csv'), 
-          row.names = F)
-```
-
-Analysis in python shows that there are indeed the expected differences between the macthed synesthete and control samples in terms of basic network metrics. 
 
 ## Cluster number perturbation
 
-We want to make sure that at least the basic network differences are robust to small changes in the number of clusters. Since spatial resolution / node number is known to affect network properties, we want to choose some cluster numbers close to the optimal for testing.
-
-In the code below, we will iterate over four values close to the optimal cutoff (3 above, 3 below) and examine the summarised data for the matched control sample. 
+Tests on the matched data up to this point indicate that the clustering is appropriate, and that there are group differences in basic network metrics. However, we also want to be sure that our specific choice of clustering is not driving these group differences. Therefore, we will check that the basic network differences are robust to small changes in the number of clusters. Since spatial resolution / node number is known to affect network properties, we want to choose some cluster numbers close to the optimal for testing. We will iterate over four cutoff values close to the optimal (3 above, 3 below) and examine the summarised data for the matched control sample. 
 
 ```{r alternative_clusters, message=F, warning=F}
-# Set cutoff values
+# Generate alternative cluster numbers #
+
+# Set cutoff values --- change if needed
 cuts = c(cut - 0.03, cut - 0.025, cut - 0.02, 
          cut + 0.01, cut+ 0.02, cut + 0.035)
 
 # Initialise results
+data_matched_hc_alts = list()
 plots = list()
-SA_abs_matched_clust_alts = list()
+distr_tests = list()
 
 # Iterate over cutoffs
 for (i in 1:length(cuts)){
   # Perform clustering
-  clust_wrd_alt = hclust.plot(SA_abs_lr, group = 'Control', 
+  hc_alt = hclust.plot(data_lr, group = 'Control', 
                               clust_method = 'ward.D', cut = cuts[i], 
                               clustn = clustn, plot_tree = F)
   
   # Print number of clusters
-  nclust_alt = max(clust_wrd_alt[[1]]$cluster)
+  nclust_alt = max(hc_alt[[1]]$cluster)
   print(paste0('Number of clusters = ', nclust_alt))
   
   # Merge with position data
-  clust_wrd_alt_pos = merge(parcel_positions, clust_wrd_alt[[1]])
-  clust_wrd_alt_pos$cluster = factor(clust_wrd_alt_pos$cluster) 
+  hc_alt = merge(parcel_positions, hc_alt[[1]])
+  hc_alt$cluster = factor(hc_alt$cluster) 
   
-  # Summarise the matched control data by the clusters
-  SA_abs_matched_clust_alt = summarise_clusters(SA_abs_matched, 
-                                                clust_wrd_alt_pos)
-  SA_abs_matched_clust_alt = split(SA_abs_matched_clust_alt[[1]], 
-                                   SA_abs_matched_clust_alt[[1]]$Group)
+  # Summarise the matched data
+  data_matched_hc_alt = summarise_clusters(data_matched, 
+                                                hc_alt)[[1]]  # 1=sums, 2=means
   
   # Get control data and plots
-  SA_abs_matched_clust_alts[[i]] = SA_abs_matched_clust_alt
-  plots[[i]] = plot_pcors(data_list = SA_abs_matched_clust_alt, 
-                          nclust = nclust_alt, group_vec = c('Control', 'Syn'))
+  data_matched_hc_alt = split(data_matched_hc_alt, 
+                              data_matched_hc_alt$Group)
+  data_matched_hc_alts[[i]] = data_matched_hc_alt
+  alt_comp = pcor_comp(data_list = data_matched_hc_alt, 
+                          nclust = nclust_alt, 
+                       group_vec = c('Control', exp_group))
+  plots[[i]] = alt_comp[[1]]
+  distr_tests[[i]] = alt_comp[[2]][[1]][[1]]
 }
 
 grid.arrange(grobs = plots, ncol = 3)
+print(distr_tests)
 
-# Export to .csv
-for (i in 1:length(SA_abs_matched_clust_alts)){
-  write.csv(SA_abs_matched_clust_alts[[i]]$Control, 
+# Set filenames for exporting alternative clusters --- change if needed
+alt_cntrl_filename = 'SA_abs_hc_cntrl_matched_alt_'
+alt_exp_filename = 'SA_abs_hc_syn_matched_alt_'
+
+# Write to .csv
+for (i in 1:length(data_matched_hc_alts)){
+  write.csv(data_matched_hc_alts[[i]][[1]], 
           file = paste0(savepath_data, 
-                        'hclust/SA_abs_wrd_sum_cntrl_matched_alt_', i, '.csv'), 
+                        'hclust/', alt_cntrl_filename, i, '.csv'), 
           row.names = F)
-  write.csv(SA_abs_matched_clust_alts[[i]]$Syn, 
+  write.csv(data_matched_hc_alts[[i]][[2]], 
           file = paste0(savepath_data, 
-                        'hclust/SA_abs_wrd_sum_syn_matched_alt_', i, '.csv'), 
+                        'hclust/', alt_exp_filename, i, '.csv'),  
           row.names = F)
 }
 ```
 
-This process has tested cluster numbers 59, 60, 61, 63 64, and 65. In each case, we see that the synesthete partial correlations are distributed more widely than the matched controls, as was observed in the optimal 62 cluster case. This likely demonstrates that the main structure of our results is not drastically affected by small changes to the number of clusters away from 62. 
-
-To confirm this result, we performed network analysis in python using the exported .csv files. The network analysis indicates that the results are robust across these changes in cluster number. Let's import the metrics and visualise clustering and efficiency for each cluster number.
+This process has tested cluster numbers 59, 60, 61, 63 64, and 65. In each case, we see that the synaesthete partial correlations are distributed more widely than the matched controls, as was observed in the optimal 62 cluster case. This is supported by consistent findings of distribution differences with the F test and KS test. This demonstrates that the main structure of our results is not drastically affected by small changes to the number of clusters away from the optimal number of 62. To confirm that network structure does not change, we performed network analysis in python using clustered data for each set of clusters. We will import and visualise the results.
 
 ```{r alternative_clusters_net_metrics, message=F, warning=F}
+# Report alternative cluster network metrics #
+
+# Set filename for alternative cluster metrics --- change if needed
+alt_metrics_filename = 'HC_matched_alt_net_metrics.csv'
+
+# Set alternative cluster numbers --- change if needed
+alt_cluster_ns = c(59,60,61,62,63,65) 
+
 net_metrics = read.csv(paste0(savepath_data, 
-                              'hclust/clust_wrd_matched_alt_net_metrics.csv'))
-net_metrics$cluster_number = rep(c(59,60,61,62,63,65), 2)
-net_metrics = net_metrics[,c(1,2,6,7)]
+                              'hclust/', alt_metrics_filename))
+net_metrics$cluster_number = rep(alt_cluster_ns, 2)
+net_metrics = net_metrics[,c("clustering", "efficiency", 
+                             "cluster_number", "Group")]
+colnames(net_metrics)[c(1,2)] = c('Clustering', 'Efficiency')
 net_metrics = melt(net_metrics, id.vars = c('cluster_number','Group'))
-net_metrics$Group = factor(net_metrics$Group, levels = c('Control', 'Syn'))
+net_metrics$Group = factor(net_metrics$Group, levels = c('Control', exp_group))
 net_metrics$cluster_number = factor(net_metrics$cluster_number)
 
 # Plot results
 ggplot(data = net_metrics, aes(x = variable, y = value, fill = Group))+
   geom_col(width = 0.8, position = position_dodge(0.8), 
-           alpha = 0.5, colour = 'black')+
+           alpha = 0.5, colour = 'black', lwd = 0.8)+
+  
+  scale_y_continuous(expand = expansion(add = c(0,0)))+
   scale_fill_manual(values = c('blue', 'red'))+
   scale_colour_manual(values = c('blue', 'red'))+
-  labs(x = 'Metric', y = 'Value')+
-  guides(fill = guide_legend(override.aes = list(alpha = 1)))+
+  coord_cartesian(clip = 'off')+
+  
+  labs(x = '', 
+       y = '',
+       title = 'Network metrics for alternative clusters')+
+  #guides(fill = guide_legend(override.aes = list(alpha = 1)))+
+  theme_classic()+
   theme(
-    legend.position = 'top')+
-  facet_wrap(~cluster_number, scales = 'free_y')
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 12, colour = 'black'),
+    axis.line = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'top',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0)),
+    strip.background = element_blank())+
+  facet_wrap(~cluster_number)
 ```
 
+We have plotted clustering coefficient and efficiency here since they go nicely on the same scale. We observe very similar values across clusters, with synaesthete values consistently higher than controls. This confirms that basic network analysis is robust to small changes in the hierarchical clustering.
 
 
+# Further network analysis
 
-## Multivariate distribution
+Our analysis to this point indicates there are some notable differences between the matched controls and synaesthetes in terms of their correlation network structure. We will now extend our analysis to look at deeper aspects of network organisation.
 
-Indeed, we can clearly see that both clustering and efficiency are consistently increased in synesthetes across these cluster numbers. This gives some confidence that these results are real group differences, and not an artefact of the clustering process.
+## Weight by distance relationship and small-worldness
 
-Now we want to check if these findings are robust to some changes in the exact samples; i.e., whether these results reflect stable differences in the correlation structure or if they are specific to the empirical samples we used. To test this, and to determine statistical significance, we can use the copula approach to model the correlation structure of both empirical samples, and create new synthetic data based on this structure. 
-
-However, the choice of copula depends on the properties of the population correlation structure. It is typically assumed that this kind of data follows a multivariate normal (or at least elliptical) distribution, for which we can use a gaussian copula. However, we should not just assume this is the case. This question also holds further ramifications for the network analysis of empirical and synthetic data. Ultimately, we are interested in using partial correlations to form a graph that accurately describes the structural relationships between a set of regions of the brain. However, this description is only fully accurate under a gaussian assumption; i.e.: partial correlations will only capture the full dependence structure of the data if it follows a multivariate normal distribution. 
-
-Therefore, we are going to check the MVN assumption holds for 1) our full control data, prior to clustering and 2) our matched data, after clustering. We first examine the Mahalanobis distances of each variable, which should follow a chi-squared distribution. We also perform several tests from the MVN package. Let's first do this for the complete control data used to generate the clusters:
-
-```{r lr_MVN_tests}
-# MVN tests for complete control data, prior to clustering
-MVN_test(SA_abs_lr[SA_abs_lr$Group == 'Control',8:ncol(SA_abs_lr)])
-```
-
-While the tests are not in complete agreement of an MVN distribution, the Mahalanobis distance plot indicates that an MVN assumption is not inappropriate. The results here are likely affected by both the large number of dimensions (n = 180) and the large number of samples for each dimension (n = 650). This means it is easier for the data to fail normality tests.
-
-Let's now check the matched data, after clustering, to ensure our partial correlations appropriately describe the cluster dependence structure in each group:
-
-```{r cluster_MVN_tests}
-MVN_test(SA_abs_matched_clust$Control[,8:ncol(SA_abs_matched_clust$Control)])
-MVN_test(SA_abs_matched_clust$Syn[,8:ncol(SA_abs_matched_clust$Syn)])
-```
-
-The results here are similar to the full control data. The distribution of Mahalanobis distances would point towards MVN for both groups. However, the tests are not completely suggestive of this. If we check the distributions of the individual clusters:
-
-```{r cluster_univariate_normality}
-table(mvn(SA_abs_matched_clust$Control[,8:ncol(SA_abs_matched_clust$Control)])
-      [['univariateNormality']]$Normality)
-```
-
-We see that most clusters are normally distributed. Therefore, the failure to pass the MVN tests is likely a result of a few clusters not having exactly normal properties, which is not unlikely with this many clusters (62 * 0.05 = 3). 
-
-Therefore, in making the MVN assumption, we can be fairly sure that partial correlations accurately describe conditional dependence structure of our data. Furthermore, this suggests we can use a gaussian copula to accurately model the correlation structure.
-
-## Copula sampling
-
-Given these results, let's generate gaussian copulae based off the cluster-summarised matched log-transformed data, take some samples, and export them to python for analysis:
-
-```{r copula_sampling, message = F, warning = F}
-# Generate copula samples
-set.seed(params$seed)
-SA_abs_matched_clust_cntrl_copula = 
-  sampleCopula(data = SA_abs_matched_clust$Control, 
-                                                 log = F, 
-                                                 copulatype = c('vine'), 
-                                                 invert = c('empirical'),
-                                                 n = 102, 
-                                                 n_samp = 10)
-set.seed(params$seed)
-SA_abs_matched_clust_syn_copula = 
-  sampleCopula(data = SA_abs_matched_clust$Syn, 
-                                                 log = F, 
-                                                 copulatype = c('vine'), 
-                                                 invert = c('empirical'),
-                                                 n = 102, 
-                                                 n_samp = 10)
-# Export to python
-for (i in 1:10){
-  write.csv(SA_abs_matched_clust_cntrl_copula[[i]][["copula_samples"]], 
-            paste0(savepath_data, 
-                   'hclust/SA_abs_matched_clust_cntrl_copula_', i, '.csv'), 
-            row.names = F)
-  write.csv(SA_abs_matched_clust_syn_copula[[i]][["copula_samples"]], 
-            paste0(savepath_data, 
-                   'hclust/SA_abs_matched_clust_syn_copula_', i, '.csv'), 
-            row.names = F)
-}
-
-copula_MAE_cntrl = mean(sapply(SA_abs_matched_clust_cntrl_copula,
-                          FUN = function(list){list[["cor_error"]]}))
-copula_MAE_syn = mean(sapply(SA_abs_matched_clust_syn_copula,
-                          FUN = function(list){list[["cor_error"]]}))                        
-
-print(c(copula_MAE_cntrl, copula_MAE_syn))
-```
-
-Note that the mean absolute error for the sampled correlations compared to empirical correlations is quite low for both groups, at < .1. 
-
-Having run the network analysis on these samples in python, let's import the network metrics and compare them across groups.
-
-```{r copula_metrics}
-# Import metrics
-net_metrics = read.csv(paste0(
-  savepath_data, 'hclust/clust_wrd_matched_copula_net_metrics.csv'))
-net_metrics = melt(net_metrics, id.vars = 'Group')
-net_metrics$Group = factor(net_metrics$Group, levels = c('Control', 'Syn'))
-
-# Run statistics
-run_tests = function(data) {
-  t_test_result = t.test(value ~ Group, data = data)
-  effect_size = cohen.d(value ~ Group, data = data, hedges = T)$estimate
-  shapiro_control = shapiro.test(data$value[data$Group == "Control"])
-  shapiro_syn = shapiro.test(data$value[data$Group == "Syn"])
-  tibble(
-    mean_control = mean(data$value[data$Group == "Control"]),
-    mean_syn = mean(data$value[data$Group == "Syn"]),
-    shapiro_control = shapiro_control$p.value,
-    shapiro_syn = shapiro_syn$p.value,
-    effect_size = effect_size,
-    p_value = t_test_result$p.value
-  )
-}
-net_metrics_summary = net_metrics %>%
-  group_by(variable) %>%
-  group_modify(~ run_tests(.x)) %>%
-  ungroup()
-
-print(net_metrics_summary)
-
-# Plot results
-ggplot(data = net_metrics, aes(x = Group, y = value, 
-                               fill = Group, colour = Group))+
-  stat_summary(fun = mean, geom = 'col', 
-               alpha = 0.5, width = 0.8, colour = 'black')+
-  geom_point(shape = 21, stroke = 1, size = 2, fill = NA, show.legend = F, 
-             position = position_jitter(0.1))+
-  scale_fill_manual(values = c('blue', 'red'))+
-  scale_colour_manual(values = c('blue', 'red'))+
-  theme(
-    axis.title.x = element_blank(),
-    axis.text.x = element_blank(),
-    axis.ticks.x = element_blank(),
-    axis.title.y = element_blank(),
-    legend.position = 'top')+
-  guides(fill = guide_legend(override.aes = list(alpha = 1)))+
-  facet_wrap(~variable, scales = 'free_y', 
-             labeller = as_labeller(c(clustering = 'Clustering',
-                                      efficiency = 'Efficiency',
-                                      L_obs = 'Path length',
-                                      mean_eb = 'Mean edge betweenness',
-                                      mean_vb = 'Mean vertex betweenness')))
-```
-
-# Analysis of similarity-distance relationship
-
-These results confirm that there are clear differences between controls and synesthetes in their correlation structure. We now want to extend our analysis to include the examine the role of physical distance.
-
-## Weight by distance relationship
-
-To examine the possible spatial differences between the groups, we can visualise the networks. We have drawn the graphs in python, so let's import them here:
+One interesting line of investigation is considering how the correlational networks are related to the structure of the brain. One immediate method of examining this question is to look at the networks plotted according to brain anatomy, such that each cluster is close to where its parcels are located. We have generated network visualisations in python, so we will import them here for visualisation.
 
 ```{r matched_control_network, fig.cap = 'Partial correlation network of 62 SA clusters in controls'}
-# Import network visualisations
-python_imports = 'D:/Documents/Academia/projects/ward_lab/MRI_analysis/outputs/synesthesia_100brains/surface_area/python/'
-knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_cntrl_net.png'))
+# Import control network visualisation #
+
+# Set filename for control network --- change if needed
+control_net_filename = 'SA_abs_matched_hc_cntrl_net.png' 
+knitr::include_graphics(paste0(python_imports, control_net_filename))
 ```
 
 ```{r matched_syn_network, fig.cap = 'Partial correlation network of 62 SA clusters in synesthetes'}
-knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_syn_net.png'))
+# Import experimental network visualisation #
+
+exp_net_filename = 'SA_abs_matched_hc_syn_net.png'
+knitr::include_graphics(paste0(python_imports, exp_net_filename))
 ```
 
-In python, we have also calculated the 2D distance between every node and merged these with the edge weights (i.e. partial correlation strengths). Let's import that data and visualise it for the two groups:
+Here we can see the generally stronger correlations in the synaesthete network, which appear to be at longer ranges compared to the control network.
+
+To confirm this possible trend, we can plot the distribution of weights according to physical distance. In python, we have calculated the 2D distance between every node (as plotted on the flattened cortex) and merged these with the edge weights (i.e. partial correlation strengths). Here, we will visualise the distance-weight relationship for each group, and use a Generalized Additive Model (GAM) to model the relationship. GAMs work by fitting a curve (spline) to the data through the optimisation of smooth functions between different regions of the predictor(s). The mgcv R package has an automated optimisation procedure for fitting splines, which maximises fit to the data while also penalising overfitting (excessive bendiness in the curve). The comparison of different smooth parameters 
+
 
 ```{r weight_by_dist, fig.cap = 'Distance-correlation relationships for controls and synesthetes', warning=F, message=F}
-# Import and combine 2D distance data
-dists_cntrl = read.csv(paste0(savepath_data,
-                              'hclust/clust_wrd_matched_cntrl_dists.csv'))
-dists_syn = read.csv(paste0(savepath_data,
-                            'hclust/clust_wrd_matched_syn_dists.csv'))
-dists = rbind(dists_cntrl, dists_syn)
-dists$Group = rep(c('Control', 'Syn'), each = nrow(dists)/2)
+# Import and combine 2D distance data #
 
+# Set filenames for distances --- change if needed
+dists_cntrl_filename = 'hc_matched_cntrl_dists.csv' 
+dists_exp_filename = 'hc_matched_syn_dists.csv'
+
+dists_cntrl = read.csv(paste0(savepath_data,
+                              'hclust/', dists_cntrl_filename))
+dists_exp = read.csv(paste0(savepath_data,
+                            'hclust/', dists_exp_filename))
+dists = rbind(dists_cntrl, dists_exp)
+dists$Group = rep(c('Control', exp_group), each = nrow(dists)/2)
+dists$Group = factor(dists$Group, levels = c('Control', exp_group))
+
+# Plot empirical weight vs distance with smooth curves
 ggplot(data = dists, aes(x = distance, y = weight, colour = Group))+
+  geom_point(shape = 21, alpha = 0.15)+
   geom_smooth(lwd = 1.1)+
   scale_color_manual(values = c('blue', 'red'))+
-  labs(x = 'Two-dimensional distance (pixels)', # change to mm at some point
-       y = 'Absolute partial correlation')
+  labs(x = 'Two-dimensional distance (pixels)',
+       y = 'Absolute partial correlation',
+       title = 'Weight as a function of cortical distance')+
+  theme_classic()+
+  theme(
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 10, colour = 'black'),,
+    axis.line = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'none',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0))
+  )
+
+# Fit a generalized additive model to compare groups
+gam_model = gam(weight ~ s(distance, by = Group, k = 7) + Group, data = dists,
+             family = 'gaussian')
+print(summary(gam_model))  # for signifiance of model terms
+gam_model_no_int = gam(weight ~ s(distance, k = 7) + Group, data = dists, 
+                       family = 'gaussian')  # without group separation
+print(anova.gam(gam_model, gam_model_no_int, 
+          test = 'Chisq'))  # for testing the group separation
+
+# Predict weight-distance relationship from fitted GAM
+distance_grid = seq(min(dists$distance), max(dists$distance), length.out = 500)
+dist_tem_cntrl = data.frame(distance = distance_grid, 
+                            Group = factor("Control", 
+                                           levels = levels(dists$Group)))
+dist_tem_exp = data.frame(distance = distance_grid, 
+                               Group = factor(exp_group, 
+                                              levels = levels(dists$Group)))
+weight_pred_cntrl = predict(gam_model, 
+                            newdata = dist_tem_cntrl, type = "response")
+weight_pred_exp = predict(gam_model, 
+                            newdata = dist_tem_exp, type = "response")
+GAM_preds = data.frame(
+  distance = rep(distance_grid, 2),
+  weight = c(y_pred_control, y_pred_treatment),
+  Group = rep(c("Control", "Treatment"), each = length(distance_grid))
+)
+
+# Plot predicted curves
+ggplot(GAM_preds, aes(x = distance, y = weight, color = Group)) +
+  geom_line(size = 1.2) +
+  
+  scale_color_manual(values = c("blue", "red"))+
+  
+  labs(title = "Predicted GAM curves", 
+       x = 'Two-dimensional distance (pixels)',
+       y = "Predicted partial correlation") +
+  theme_classic()+
+  theme(
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 10, colour = 'black'),,
+    axis.line = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'none',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0))
+  )
+
+# Plot predicted difference curve
+GAM_diffs = data.frame(
+  distance = distance_grid,
+  difference = weight_pred_cntrl - weight_pred_exp
+)
+ggplot(GAM_diffs, aes(x = distance, y = difference)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  geom_line(color = "darkgreen", size = 1.2) +
+  
+  labs(title = "Group difference in GAM curves", 
+     x = 'Two-dimensional distance (pixels)',
+     y = "Control - Treatment")+
+  theme_classic()+
+  theme(
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 10, colour = 'black'),,
+    axis.line = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'none',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0))
+  )
+
+
+# Get numerical curve differences
+mean_difference = mean(GAM_diffs$difference)
+max_difference = max(abs(GAM_diffs$difference))
+
+cat("Mean difference across distance:", mean_difference, "\n")
+cat("Maximum absolute difference:", max_difference, "\n")
 ```
 
-While controls appear to have stronger relationships at shorter distances, in synesthetes the relationship is flatter with stronger correlations at longer distances compared to controls.
+Examination of the distance-weight relationships shows that both controls and synaesthetes have the strongest weights at short distances, and this rapidly drops off as distances increases. However, while this continues to decline in controls, in synaesthetes the weights increase again at the longest distances. Examining the fit of a GAM, we see that both the parametric effect of group as well as the smoothing terms are statistically significant, suggesting that 1) synaesthetes have significantly different weights to controls and 2) that incorporating smoothing terms significantly improves model fit, supporting a non-linear relationship between distance and weight. In comparing a GAM with separate group smoothing terms to one with just one smooth term (but still a parametric group effect), we observe a statistically significant difference via analysis of deviance, suggesting that the two groups have different distance-weight relationships.
+
 
 ## Small-worldness
 
-With the 2D distances, we can also examine small-worldness through small-world propensity (SWP). This metric is calculated by comparing the clustering coefficient and characteristic path length of the observed network to two null models: a locally-strong lattice network and a distantly-strong randomly rewired network. 
+With physical distance data, we can also examine the concept of small-worldness through small-world propensity (SWP). This metric is calculated by comparing the clustering coefficient and characteristic path length of the observed network to two null models: a locally-strong lattice network and a distantly-strong randomly rewired network. 
 
-In python, we have calculated *SWP* independently for each of our observed graphs. This means that each observed graph is compared to its own null models, thus controlling for differences in node strengths. We have also calculated *delta*, which indicates which null model properties are driving deviations from perfect small-worldness. 
-
-Let's import the results for comparison:
+In python, we have calculated *SWP* independently for each of our observed graphs. This means that each observed graph is compared to its own null models, thus controlling for differences in node strengths. We have also calculated *delta*, which indicates which null model properties are driving deviations from perfect small-worldness. As with the basic network metrics, we have estimated variances of SWP and delta through jackknife resampling, as well as statistical significance through permutation tests. We will import the results here for visualisation.
 
 ```{r SWP, fig.cap = 'SWP and delta values in controls and synesthetes'}
-# Import SWP results
-SWP = read.csv(paste0(savepath_data,
-                              'hclust/clust_wrd_matched_SWP.csv'))
-SWP = melt(SWP, id.vars = 'Group')
+# Report small-world propensity #
 
-# Plot SWP and delta
-ggplot(data = SWP, aes(x = Group, y = value, fill = Group))+
-  geom_col(position = position_dodge(), color = 'black', alpha = 0.5)+
+# Read in SWP results 
+SWP = read.csv(paste0(savepath_data, 'hclust/', 'hc_matched_SWP.csv'))
+SWP_jk = read.csv(paste0(savepath_data, 'hclust/', 
+                         'hc_matched_jackknife_SWPs.csv'))
+SWP_perm = read.csv(paste0(savepath_data, 'hclust/', 'hc_matched_SWP_perm.csv'))
+
+# Wrangle data
+SWP = melt(SWP, id.vars = 'Group', variable.name = 'Metric')
+SWP_se = select(SWP_jk, 1,2,4)
+SWP = merge(SWP, SWP_se)
+SWP_perm = melt(SWP_perm, 
+                .id_vars = 'Stat', variable.name = 'Metric')
+pvals = SWP_perm[SWP_perm$Stat == 'P-value',]
+
+# Create p-value positions
+SWP_lims = SWP %>%
+  group_by(Metric) %>%
+  summarise(y_max = max(value+SE, na.rm = TRUE))
+
+pvals = pvals %>%
+  left_join(SWP_lims, by = "Metric") %>%
+  mutate(y_pos = y_max * 1.1) 
+
+# Plot SWP
+ggplot(data = SWP[SWP$Metric == 'SWP',], aes(x = Group, y = value, fill = Group))+
+  geom_col(position = position_dodge(), color = 'black', alpha = 0.5, lwd = 0.8)+
+  geom_errorbar(aes(ymin = value - SE, ymax = value + SE),
+                width = 0.6, colour = 'black', lwd = 0.8)+
+  geom_segment(data = pvals[pvals$Metric == 'SWP',],
+               aes(x = 1, xend = 2, y = y_pos, yend = y_pos),
+               inherit.aes = FALSE, lwd = 0.8) +
+  geom_text(data = pvals[pvals$Metric == 'SWP',],
+            aes(x = 1.5, y = y_pos * 1.1, label = value),
+            inherit.aes = FALSE, size = 5)+
+  
+  scale_y_continuous(expand = expansion(add = c(0,0)))+
+  coord_cartesian(ylim = c(0,1), clip = 'off')+
   scale_fill_manual(values = c('blue', 'red'))+
-  labs(x = '',
-       y = '')+
-    facet_wrap(~variable, scales = 'free_y')
+  
+  labs(x = 'Group',
+       y = 'SWP',
+       title = 'Small-world propensity')+
+  theme_classic()+
+  theme(
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 12, colour = 'black'),
+    axis.line = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'none',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 50, 0))
+  )
+
+# Plot delta
+ggplot(data = SWP[SWP$Metric == 'delta',], aes(x = Group, y = value, fill = Group))+
+  geom_col(position = position_dodge(), color = 'black', alpha = 0.5, lwd = 0.8)+
+  geom_errorbar(aes(ymin = ifelse(value - SE > -1, value - SE, -1),
+                    ymax = value + SE),
+                width = 0.6, colour = 'black', lwd = 0.8)+
+  geom_segment(data = pvals[pvals$Metric == 'delta',],
+               aes(x = 1, xend = 2, y = 1.1, yend = 1.1),
+               inherit.aes = FALSE, lwd = 0.8) +
+  geom_text(data = pvals[pvals$Metric == 'delta',],
+            aes(x = 1.5, y = 1.2, label = value),
+            inherit.aes = FALSE, size = 5)+
+  
+  scale_y_continuous(expand = expansion(add = c(0,0)))+
+  coord_cartesian(ylim = c(-1,1), clip = 'off')+
+  scale_fill_manual(values = c('blue', 'red'))+
+  
+  labs(x = 'Group',
+       y = 'Delta',
+       title = 'Delta')+
+  theme_classic()+
+  theme(
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 12, colour = 'black'),
+    axis.line.x = element_blank(),
+    axis.line.y = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.x = element_blank(),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'none',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 50, 0))
+  )
 ```
 
-While the control SWP is around what you would expect for a brain-derived network, the synesthete SWP is lower, indicating less small-world properties. The delta values indicate that while both networks are closer to their random null models, in synesthetes this is particularly extreme, suggesting a substantial deviation from local clustering.
+SWP appears to be slightly higher in controls than synaesthetes, although it is not statistically significant. In both groups, delta is low, suggesting that deviations from perfect small-worldness are driven by a greater degree of randomness than expected. Although this is slightly less the case in the synaesthete network, there is no statistical difference. We should note for now that the estimated variance is very large. This is likely because SWP estimation itself varies fairly substantially from instance to instance due to random graph generation; this could be remedied by averaging over several random graphs, although this would drastically increase the computational cost. 
 
-# Analysis of local vertex properties
 
-So far, we have shown that control and synesthete networks differ in several global properties. However, it would be interesting to see if this is a global trend or if specific clusters contribute to these patterns.
+## Analysis of local vertex properties
 
-In python, we have created several networks which scale node colour and size according to the local clustering and betweenness. First, we show this for each of the control and synesthetes separately, where these properties correspond to the absolute values of these metrics with scaling for visualisation:
+So far, we have shown that control and synaesthete networks differ in several global properties. However, it would be interesting to see if these differences apply equally across the network, or if specific clusters contribute to these patterns.
 
-```{r bcnetwork_control, fig.cap = 'Control network for vertex colour and size scale with clustering and betweenness'}
-knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_cntrl_bcnet.png'))
-```
-
-`
-```{r bcnetwork_syn, fig.cap = 'Synesthete network for vertex colour and size scale with clustering and betweenness'}
-knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_syn_bcnet.png'))
-```
-
-Along with the global differences in clustering, we see some more specific differences. Vertex betweenness is more variable for synesthetes than controls, with some vertices (such as the PCC) having very high betweenness. Vertices with higher betweenness also seem to have greater clustering, although this isn't always the case.
-
-Note that this can be difficult to interpret since betweenness and clustering will be overall greater when there are stronger edges (which there are in synesthetes). Note - we should compare the distributions of the absolute values of these metrics, since the scaling for visualisation could also be misleading.
-
-To perhaps improve the visualisation, we also created a network showing the differences between the control and synesthete networks. Node colour and size correspond to differences in local clustering and betweenness, while edge size corresponds to the size of the difference between partial correlation size. All differences are absolute. 
+In python, we created a network showing the differences between the control and synaesthete networks. Node colour and size correspond to differences in local clustering and betweenness, while edge size corresponds to the size of the difference between partial correlation size. All differences are absolute. 
 
 ```{r diffnetwork, fig.cap = 'Network showing group differences in correlation strength, local clustering and betweenness'}
-knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_diffnet.png'))
+# Import difference network visualisation #
+
+# Set filename for difference network --- change if needed
+diffnet_filename = 'SA_abs_matched_hc_diffnet.png'
+knitr::include_graphics(paste0(python_imports, diffnet_filename))
 ```
 
 The biggest differences in clustering appear to be in the prefrontal cortex, hippocampus and PCC. The biggest differences in betweenness are in the hippocampus and PCC. The biggest differences in edge weights are from the mPFC to hippocampus, PCC to hippocampus, DLPFC to parietal cortex.
 
-# Positive and negative split graphs
 
-So far, we have been looking at networks formed from absolute partial correlation, under the assumption that any association is important for distinguishing groups. However, there may be specific information contained within the positive or negative associations alone. To address this, we'll examine networks formed from just the positive or negative correlations.
+## Positive and negative split graphs
 
-First, let's compare the distributions of positive and negative correlations across groups:
+So far, we have been looking at networks formed from absolute partial correlation, under the assumption that any association is important for distinguishing groups. However, there may be specific information contained within the positive or negative associations alone. To address this, we will examine networks formed from just the positive or negative correlations.
+
+First, we will compare the distributions of positive and negative correlations across groups.
 
 ```{r signed_pcor_distributions, fig.cap = 'Distributions of positive and negative partial correlations'}
+# Examine signed partial correlations #
+
 # Generate partial correlations
-pcor_list = lapply(SA_abs_matched_clust, FUN = function(df){pcor(df[,8:ncol(df)])$estimate})
+pcor_list = lapply(data_matched_wrd, FUN = function(df){pcor(df[, -metadata_cols])$estimate})
 pcor_list = lapply(pcor_list, FUN = function(df){df = melt(df)})
 pcors = bind_rows(pcor_list, .id = 'Group')
 
@@ -1169,59 +920,111 @@ pcors$sign = ifelse(pcors$value > 0, 'Positive', 'Negative')
 pcors = pcors[!pcors$value == 1,] # remove self-correlations
 
 # plot partial correlation distributions
-pcors$Group = factor(pcors$Group, levels = c('Control', 'Syn'))
+pcors$Group = factor(pcors$Group, levels = c('Control', exp_group))
 pcors$sign = factor(pcors$sign, levels = c('Positive', 'Negative'))
 
 # Plot distributions
 ggplot(data = pcors, aes(x = value, color = Group))+ 
   geom_density(lwd = 1.05)+
+  
   scale_color_manual(values = c('blue', 'red'))+
   labs(x = 'Partial correlation', y = 'Density')+
-  theme(legend.position = 'top')+
+  theme_classic()+
+  theme(
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 12, colour = 'black'),
+    axis.line.y = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(2, 'mm'),
+    legend.position = 'top',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 50, 0)),
+    strip.background = element_blank()
+    )+
   facet_wrap(~sign, scales = 'free_x')
-
-
-
 ```
 
 Overall the two distributions look quite similar. The synesthetes may have a higher number of strong correlations (0.5) compared to controls in the negative more so than the positive, while the opposite is true for somewhat weaker correlations (0.2).
 
-In python, we have visualised the positive and negative networks. Let's import them here:
+In python, we have visualised networks formed from only positive or negative correlations. We will visualise them here to look for differences.
 
 ```{r split_net_control_pos, fig.cap = 'Network of positive partial correlations in controls'}
-knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_cntrl_split_pos.png'))
+# Import positive control network visualisation
+
+# Set filename for positive control network --- change if needed
+pos_cntrl_filename = 'SA_abs_matched_hc_cntrl_split_pos.png' 
+knitr::include_graphics(paste0(python_imports, pos_cntrl_filename))
 ```
 
 ```{r split_net_control_neg, fig.cap = 'Network of negative partial correlations in controls'}
-knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_cntrl_split_neg.png'))
+# Import negative control network visualisation
+
+# Set filename for positive control network --- change if needed
+neg_cntrl_filename = 'SA_abs_matched_hc_cntrl_split_neg.png'
+knitr::include_graphics(paste0(python_imports, neg_cntrl_filename))
 ```
 
 ```{r split_net_syn_pos, fig.cap = 'Network of positive partial correlations in synesthetes'}
-knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_syn_split_pos.png'))
+# Import positive experimental network visualisation
+
+# Set filename for positive control network --- change if needed
+pos_exp_filename = 'SA_abs_matched_hc_syn_split_pos.png'
+knitr::include_graphics(paste0(python_imports, pos_exp_filename))
 ```
 
 ```{r split_net_syn_neg, fig.cap = 'Network of negative partial correlations in synesthetes'}
-knitr::include_graphics(paste0(python_imports, 'SA_abs_matched_clust_syn_split_neg.png'))
+# Import negative experimental network visualisation
+
+# Set filename for positive control network --- change if needed
+neg_exp_filename = 'SA_abs_matched_hc_syn_split_neg.png' 
+knitr::include_graphics(paste0(python_imports, neg_exp_filename))
 ```
 
 It looks like the control positive network is has stronger connections at short range, while the negative network as strong connections at multiple distances. For synesthetes, this pattern looks more compressed, with some long-range positive connections and shorter-range negative connections.
 
-Let's compare the network metrics of these:
+We will now compare the network metrics, as calculated in python. 
 
 ```{r split_net_metrics, fig.cap = 'Network metrics of positive and negative networks', message = F}
-# Import metrics
+# Report positive and negative network metrics #
+
+# Set filename for split network metrics --- change if needed
+split_metrics_filename = 'hc_matched_split_net_metrics.csv' 
 net_metrics = read.csv(paste0(savepath_data,
-                              'hclust/clust_wrd_matched_split_net_metrics.csv'))
+                              'hclust/', split_metrics_filename))
 
 net_metrics = melt(net_metrics, .id_vars = c('Group', 'Sign'))
 net_metrics$Sign = factor(net_metrics$Sign, levels = c('Positive', 'Negative'))
 
 # Plot results
 ggplot(data = net_metrics, aes(x = Sign, y = value, fill = Group))+
-  geom_col(color = 'black', alpha = 0.5, position = position_dodge())+
+  geom_col(position = position_dodge(),
+           alpha = 0.5, color = 'black',  lwd = 0.8)+
+  
+  scale_y_continuous(expand = expansion(add = c(0,0)))+
   scale_fill_manual(values = c('blue', 'red'))+
-  labs(x = '', y = '')+
-  facet_wrap(~variable, scales = 'free_y')
+  coord_cartesian(clip = 'off')+
+  
+  labs(x = '', 
+       y = '',
+       title = 'Network metrics in signed networks')+
+  theme_classic()+
+  theme(
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 10, colour = 'black'),,
+    axis.line = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'none',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0)),
+    strip.background = element_blank(),
+    strip.text = element_text(margin = margin(10,0,10,0))
+  )+
+  facet_wrap(~variable, scales = 'free_y',
+             labeller = as_labeller(c(clustering = 'Clustering',
+                                      efficiency = 'Efficiency',
+                                      L_obs = 'Path length',
+                                      mean_eb = 'Mean edge betweenness',
+                                      mean_vb = 'Mean vertex betweenness',
+                                      mean_pcor = 'Mean partial correlation')))
 ```
 
 Interestingly, clustering is lower in positive networks, where it is also the same between groups. Efficiency is greater in positive networks, but appears to be proportionally higher for synesthetes in the negative networks. The average partial correlation strength is greater in positive networks, which may be driven by a few particularly strong connections. 
@@ -1229,13 +1032,20 @@ Interestingly, clustering is lower in positive networks, where it is also the sa
 To examine the possible differences in weight-distance relationships between positive and negative networks, let's import the matched distances and weights from python and plot them:
 
 ```{r weight_distance_split}
+# Visualise weight-distance relationships for split networks #
+
 # Import and combine 2D distance data
+dists_cntrl_filename = 'hc_matched_cntrl_split_dists.csv'  # filename for control distances --- change if needed
+dists_exp_filename = 'hc_matched_syn_split_dists.csv'  # filename for experimental distances --- change if needed
+
 dists_cntrl = read.csv(paste0(savepath_data,
-                              'hclust/clust_wrd_matched_cntrl_split_dists.csv'))
-dists_syn = read.csv(paste0(savepath_data,
-                            'hclust/clust_wrd_matched_syn_split_dists.csv'))
-dists = rbind(dists_cntrl, dists_syn)
-dists$Group = rep(c('Control', 'Syn'), each = nrow(dists)/2)
+                              'hclust/', dists_cntrl_filename))
+dists_exp = read.csv(paste0(savepath_data,
+                            'hclust/', dists_exp_filename))
+
+
+dists = rbind(dists_cntrl, dists_exp)
+dists$Group = rep(c('Control', exp_group), each = nrow(dists)/2)
 dists$Sign = factor(ifelse(dists$weight > 0, 'Positive', 'Negative'),
                     levels = c('Positive', 'Negative'))
 
@@ -1249,38 +1059,6 @@ ggplot(data = dists, aes(x = distance, y = weight, colour = Group))+
 
 Splitting the partial correlations by positive and negative, we see that the overall relationship between weight and distance we observed previously is largely constrained to the positive networks. In the positive network, synesthetes show weaker correlations at a shorter distance, and possibly stronger correlations at long distances compared to controls. However, in the negative network, there is no obvious relationship between distance and weight in controls, while in synesthetes, there is a trend towards decreased correlation magnitude at longer distances.  
 
-It would be a good to get an idea of the effect sizes and variance for the network metric differences. We have also created split networks for the copula samples, so let's import those results:
-
-```{r split_nets_copula, warning=F, message=F}
-# Import metrics
-net_metrics = read.csv(paste0(savepath_data, 
-                              'hclust/clust_wrd_matched_split_copula_net_metrics.csv'))
-
-# Get cohen's d for control-syn comparisons for pos and neg networks
-net_metrics$Sign = factor(net_metrics$Sign, levels = c('Positive', 'Negative'))
-cohensd = net_metrics %>%
-  group_by(Sign) %>%
-  summarise(across(where(is.numeric), ~ cohens_d(.x ~ Group)$Cohens_d, .names = "d_{.col}"))
-print(cohensd)
-
-# Get summary statistics
-net_metrics = melt(net_metrics, .id_vars = c('Group', 'Sign'))
-net_metrics = net_metrics %>%
-  group_by(Group, Sign, variable) %>%
-  summarise(value_mean = mean(value), value_sd = sd(value))
-
-# Plot results
-ggplot(data = net_metrics, aes(x = Sign, y = value_mean, fill = Group))+
-  geom_col(color = 'black', alpha = 0.5, position = position_dodge())+
-  geom_errorbar(aes(ymin = value_mean - value_sd, ymax = value_mean + value_sd),
-                position = position_dodge())+
-  scale_fill_manual(values = c('blue', 'red'))+
-  labs(x = '', y = '')+
-  facet_wrap(~variable, scales = 'free_y')
-
-```
-
-These results suggest that the differences between controls and synesthetes are generally larger for the negative networks than the positive networks. Additionally, the variance of control statistics like mean correlation is actually quite similar between positive and negative networks, suggesting that these differences represent global changes in correlation strength by sign rather than contributions of a few outliers. 
 
 ## Graph complexity
 
@@ -1292,19 +1070,19 @@ The below function calculates the Jensen-Shannon divergence for the distribution
 
 ```{r js_complexity}
 # Get JS complexity for controls and synesthetes
-js_complexity_control = js_complexity(SA_abs_matched_clust$Control, 'Control')
-js_complexity_syn = js_complexity(SA_abs_matched_clust$Syn, 'Syn')
+js_complexity_control = js_complexity(data_matched_wrd[[1]], 'Control')
+js_complexity_exp = js_complexity(data_matched_wrd[[2]], exp_group)
 print(js_complexity_control$total_js)
-print(js_complexity_syn$total_js)
+print(js_complexity_exp$total_js)
 
 # Test differences by comparing mean node divergences
 shapiro.test(js_complexity_control$vertex_means)
-shapiro.test(js_complexity_syn$vertex_means)
-t.test(js_complexity_control$vertex_means, js_complexity_syn$vertex_means)
-cohens_d(js_complexity_control$vertex_means, js_complexity_syn$vertex_means)
+shapiro.test(js_complexity_exp$vertex_means)
+t.test(js_complexity_control$vertex_means, js_complexity_exp$vertex_means)
+cohens_d(js_complexity_control$vertex_means, js_complexity_exp$vertex_means)
 
 # Get differences in vertex complexity
-js_complexity_diffs = js_complexity_control$vertex_means - js_complexity_syn$vertex_means
+js_complexity_diffs = js_complexity_control$vertex_means - js_complexity_exp$vertex_means
 print(js_complexity_diffs)
 print(order(abs(js_complexity_diffs), decreasing = TRUE))
 ```
@@ -1315,18 +1093,18 @@ It is important to check to what degree this complexity measure captures randomn
 
 ```{r js_complexity_random}
 # Get JS complexity for randomised graphs
-js_complexity_control_rand = js_complexity(SA_abs_matched_clust$Control, 
+js_complexity_control_rand = js_complexity(data_matched_wrd[[1]], 
                                            'Control', randomise = T)
-js_complexity_syn_rand = js_complexity(SA_abs_matched_clust$Syn, 
-                                       'Syn', randomise = T)
+js_complexity_exp_rand = js_complexity(data_matched_wrd[[2]], 
+                                       exp_group, randomise = T)
 print(js_complexity_control_rand$total_js)
-print(js_complexity_syn_rand$total_js)
+print(js_complexity_exp_rand$total_js)
 
 # Test differences
 shapiro.test(js_complexity_control_rand$vertex_means)
-shapiro.test(js_complexity_syn_rand$vertex_means)
-t.test(js_complexity_control_rand$vertex_means, js_complexity_syn_rand$vertex_means)
-cohens_d(js_complexity_control_rand$vertex_means, js_complexity_syn_rand$vertex_means)
+shapiro.test(js_complexity_exp_rand$vertex_means)
+t.test(js_complexity_control_rand$vertex_means, js_complexity_exp_rand$vertex_means)
+cohens_d(js_complexity_control_rand$vertex_means, js_complexity_exp_rand$vertex_means)
 
 ```
 

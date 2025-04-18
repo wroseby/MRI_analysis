@@ -15,558 +15,715 @@ def test(a,b):
     return c
 
 def partial_cor(data, absolute = True):
-    """"
-    Calculate partial correlation matrix
-    :param data: a pandas DataFrame where columns are variables and rows are subjects
-    :param absolute: if True then absolute correlation matrix is returned
     """
-    data_cov = data.cov().values # covariance values
-    precision_matrix = np.linalg.inv(data_cov) # invert cov matrix to get precision matrix
-    data_pcorr = np.zeros_like(precision_matrix) # initialise zero matrix
-    for i in range(precision_matrix.shape[0]): # fill zero matrix
-        for j in range(precision_matrix.shape[1]):
-            if i == j: # diagonal
-                data_pcorr[i, j] = 1.0 # 1s on the diagonal
-            else: # off-diagonal
-                data_pcorr[i, j] = -precision_matrix[i, j] / np.sqrt(precision_matrix[i, i] * precision_matrix[j, j]) # partial correlation
+    Calculates a partial correlation matrix from data.
 
-    data_pcorr = pd.DataFrame(data_pcorr, index=data.columns, columns=data.columns) # turn it into a pandas DataFrame
+    Parameters:
+    - data (Pandas DataFrame): Data where columns are variables and rows are subjects.
+    - absolute (bool): If true then returns absolute partial correlations.
 
-    if absolute:
-        data_pcorr = abs(data_pcorr)
-
-    return (data_pcorr) # return the absolute partial correlations
-
-def data_to_graphs(data, groupname = False, log = False, split_sign = False, absolute = True):
+    Returns:
+    - DataFrame: Partial correlation matrix.
     """
-    Convert data file into a graph
-    :param data: name of file where data is stored
-    :param groupname: if True then data is split by the group name and 'Control'
-    :param log: if True then data is log-transformed
-    :param split_sign: if True then partial correlation matrix is split into positive and negative
+
+    data_cov = data.cov().values  # get covariance values
+    precision_matrix = np.linalg.inv(data_cov)  # invert cov matrix to get precision matrix
+    data_pcorr = np.zeros_like(precision_matrix)  # initialise zero matrix to fill
+    for i in range(precision_matrix.shape[0]):  # for every row
+        for j in range(precision_matrix.shape[1]):  # and every column
+            if i == j:  # for the diagonal entries
+                data_pcorr[i, j] = 1.0  # add 1s
+            else:  # for the off-diagonal entries
+                data_pcorr[i, j] = (-precision_matrix[i, j] /
+                                    np.sqrt(precision_matrix[i, i] * precision_matrix[j, j]))  # add partial correlation
+
+    data_pcorr = pd.DataFrame(data_pcorr, index=data.columns, columns=data.columns)  # convert to pandas DataFrame
+
+    if absolute:  # if requiring absolute partial correlations
+        data_pcorr = abs(data_pcorr)  # get absolute values
+
+    return (data_pcorr)
+
+def data_to_graphs(data, data_cols, groupname = False, log = False, split_sign = False, absolute = True):
     """
-    if isinstance(data, str):
-        data = pd.read_csv(data)  # if giving filename, read it in
+    Converts data or data file into a graph-tool graph.
 
-    if log:
-        data.iloc[:,7:] = np.log(data.iloc[:,7:])
+    Parameters:
+    - data (DataFrame, str): Data or a filename containing data.
+    - data_cols (slice): Indexes of columns that contain brain data.
+    - groupname (str): Name of the experimental group for splitting the data.
+    - log (bool): If true then log-transforms the data before graph generation.
+    - split_sign (bool): If true then creates two separate graphs from positive and negative correlations.
 
-    if groupname: # if segregating by group
-        data = [data[data['Group'] == 'Control'],
+    Returns:
+    - graph-tool graph: A single or list of graphs.
+    """
+
+    if isinstance(data, str):  # if data argument is a string
+        data = pd.read_csv(data)   # load in from filename
+
+    if log:  # if wanting to log-transform data
+        data.iloc[:, data_cols] = np.log(data.iloc[:, data_cols])  # log-transform the data columns
+
+    if groupname:  # if segregating by group
+        data = [data[data['Group'] == 'Control'],  # split into list of control and experimental
                 data[data['Group'] == groupname]]
 
-    else: # if not segregating by group
-        data = [data] # put into list
+    else:  # if not segregating by group
+        data = [data]  # put into list anyway
 
-    pcormats = [] # initialise partial correlation matrices
+    pcormats = []  # initialise partial correlation matrices
 
-    if split_sign: # if splitting positive and negative
-        for datum in data:
-            pcormat = partial_cor(datum.iloc[:,7:], absolute = False)
-            pcormats_split = [pcormat.clip(lower=0), pcormat.clip(upper=0)]
-            pcormats.append(pcormats_split)
-        graphs = []
-        for i in range(len(pcormats)):
-            split_graphs = [Graph(scipy.sparse.lil_matrix(pcormats[i][0]), directed = False), # positive split
-                            Graph(scipy.sparse.lil_matrix(abs(pcormats[i][1])), directed = False)] # negative split - make positive for edge weights
-            remove_self_loops(split_graphs[0])
-            remove_self_loops(split_graphs[1])
-            graphs.append(split_graphs)
+    if split_sign:  # if splitting positive and negative
+        for datum in data:  # for each data in list
+            pcormat = partial_cor(datum.iloc[:, data_cols], absolute=False)  # get signed partial correlations
+            pcormats_split = [pcormat.clip(lower=0), pcormat.clip(upper=0)]  # get positive and negative in list
+            pcormats.append(pcormats_split)  # put into list
+        graphs = []  # initialise graphs
+        for i in range(len(pcormats)):  # for each correlation matrix
+            split_graphs = [Graph(scipy.sparse.lil_matrix(pcormats[i][0]),
+                                  directed=False),  # get graph from positive correlations
+                            Graph(scipy.sparse.lil_matrix(abs(pcormats[i][1])),
+                                  directed=False)]  # get graph from negative correlations (converted to positive)
+            remove_self_loops(split_graphs[0])  # remove self-connections (1s in matrix)
+            remove_self_loops(split_graphs[1])  # remove self-connections (1s in matrix)
+            graphs.append(split_graphs)  # add to list
 
-    else: # if not splitting positive and negative
-        for datum in data:
-            pcormat = partial_cor(datum.iloc[:,7:], absolute = absolute)
-            pcormats.append(pcormat)
-        graphs = []
-        for i in range(len(pcormats)):
-            graphs.append(Graph(scipy.sparse.lil_matrix(pcormats[i]), directed = False))
-            remove_self_loops(graphs[i])
+    else:  # if not splitting positive and negative
+        for datum in data:  # for each data in list
+            pcormat = partial_cor(datum.iloc[:, data_cols], absolute=absolute)  # get absolute partial correlations
+            pcormats.append(pcormat)  # add to list
+        graphs = []  # initialise graphs
+        for i in range(len(pcormats)):  # for each partial correlation matrix
+            graphs.append(Graph(scipy.sparse.lil_matrix(pcormats[i]), directed=False))  # generate graph
+            remove_self_loops(graphs[i])  # remove self-connections (1s in matrix)
 
-    if len(graphs) == 1:
-        graphs = graphs[0] # so that we don't get a list if only one graph
+    if len(graphs) == 1:  # if there is one graph in list
+        graphs = graphs[0]  # remove from list to return single graph object
 
     return graphs
 
 def plot_strengths(graphs):
     """
-    Plot distributions of node strengths of a list of graphs
-    :param graphs: a list of graph-tool graph objects
-    :return: a matplotlib figure
-    """
-    strengths = []
-    for graph in graphs: # for each graph
-        weight = graph.edge_properties["weight"] # get edge weights
-        strengths.append(graph.degree_property_map("total", weight = weight).a) # get total weight for each vertex
+    Plots distributions of node strengths for a list of graphs.
 
-    fig = plt.figure(figsize=(10, 6)) # initialise figure
-    ax = fig.add_subplot(1, 1, 1) # add a single panel
+    Parameters:
+    - graphs (list): A list of graph-tool graphs.
+
+    Returns:
+    - plt: A matplotlib figure.
+    """
+
+    strengths = []  # initialise list of strength values
+    for graph in graphs:  # for each graph
+        weight = graph.edge_properties["weight"]  # get edge weights
+        strengths.append(graph.degree_property_map("total", weight=weight).a)  # get total weight for each vertex
+
+    fig = plt.figure(figsize=(10, 6))  # initialise figure
+    ax = fig.add_subplot(1, 1, 1)  # add a single panel
     counts1, bins1 = np.histogram(strengths[0], bins=30, density=True)  # get the histogram of control strengths
-    plt.plot(bins1[:-1], counts1, label='Control') # plot histogram
+    plt.plot(bins1[:-1], counts1, label='Control')  # plot histogram
     counts2, bins2 = np.histogram(strengths[1], bins=30, density=True)  # get the histogram of synesthete strengths
-    plt.plot(bins2[:-1], counts2, label='Syn') # plot histogram
-    fig.set_facecolor('white') # make background white
-    ax.set_facecolor('white') # make background white
-    plt.xlabel("Node Strength") # x-axis title
-    plt.ylabel("Density") # y-axis title
-    plt.legend() # show the legend
-    plt.title("Node Strength Distributions") # set the title
-    plt.show() # show plot
+    plt.plot(bins2[:-1], counts2, label='Syn')  # plot histogram
+    fig.set_facecolor('white')  # make background white
+    ax.set_facecolor('white')  # make background white
+    plt.xlabel("Node Strength")  # x-axis title
+    plt.ylabel("Density")  # y-axis title
+    plt.legend()  # show the legend
+    plt.title("Node Strength Distributions")  # set the title
+    plt.show()  # show plot
 
 def measure_net(graph):
     """
-    Calculate basic network metrics for a graph
-    :param graph: a graph-tool graph object
-    :return: a tuple of a DataFrame of network metrics and a histogram of shortest distances
+    Calculates basic network metrics for a graph.
+
+    Parameters:
+    - graph (graph-tool graph): A graph.
+
+    Returns:
+    - DataFrame: Network metrics for a graph.
     """
 
-    net_metrics = pd.DataFrame() # initialise dataframe to store results
+    net_metrics = pd.DataFrame()  # initialise dataframe to store results
 
-    clustering = global_clustering(graph, weight=graph.ep.weight)[0]  # global weighted clustering
-
+    clustering = global_clustering(graph, weight=graph.ep.weight)[0]  # calculate global weighted clustering
     weight_inv = graph.new_edge_property("double")  # create new edge property for inverted weights
-    for e in graph.edges(): # for all the graph edges
+    for e in graph.edges():  # for all the graph edges
         weight_inv[e] = 1.0 / graph.ep.weight[e]  # get inverted weights
-    graph.ep['weight_inv'] = weight_inv # set inverted weights as graph edge property
-    # hist = distance_histogram(graph, weight = graph.ep.weight_inv, bins=[0,0.5]) # get distance histogram with inverted weights
+    graph.ep['weight_inv'] = weight_inv  # set inverted weights as graph edge property
     total_efficiency = 0.0  # initialise total efficiency for graph
     count = 0  # initialise a count
-    distances = shortest_distance(graph, weights=graph.ep.weight_inv) # shortest distances between vertices using inverted weights
-    distances_sum = 0 # initialise the sum of distances
+    distances = shortest_distance(graph, weights=graph.ep.weight_inv)  # shortest distances between vertices
+    distances_sum = 0  # initialise the sum of distances
     for j in range(graph.num_vertices()):  # for all vertices
         for k in range(j + 1, graph.num_vertices()):  # to all other vertices
             if distances[j][k] != 0:  # if shortest distance is not 0
                 total_efficiency += 1.0 / distances[j][k]  # add inverse of shortest distance to total efficiency
                 count += 1  # and add one count
-                distances_sum += distances[j][k]
-    L_obs = distances_sum / ((graph.num_vertices() - 1) * graph.num_vertices()) # characteristic (observed) path length
+                distances_sum += distances[j][k]  # add shortest distance to sum
+    L_obs = distances_sum / ((graph.num_vertices() - 1) * graph.num_vertices())  # characteristic (observed) path length
     global_efficiency = total_efficiency / count  # global efficiency of graph is mean of efficiency
-
     vb, eb = betweenness(graph, weight=graph.ep.weight_inv)  # calculate edge and vertex betweenness
 
+    # store results in DataFrame
     net_metrics['clustering'] = [clustering]
     net_metrics['efficiency'] = [global_efficiency]
     net_metrics['L_obs'] = [L_obs]
     net_metrics['mean_eb'] = [np.mean(eb)]
     net_metrics['mean_vb'] = [np.mean(vb)]
-
     net_metrics = pd.DataFrame(net_metrics)
 
     return(net_metrics)
 
-# Function to plot graphs in the following style:
-# anatomical layout, given x and y coordinates
-# nodes coloured by according to group membership, given group numbers (in x and y data)
-# edges brighter, thicker and closer to top of layer with increasing weight
-# requires graph-tool, matplotlib.cm
+def plot_network_distances(graph, label, colour):
+    """
+    Plots the distribution of network distances for a graph.
+
+    Parameters:
+    - graph (graph-tool graph): A graph.
+
+    Returns:
+    - plt: A matplotlib figure.
+    """
+
+    weight_inv = graph.new_edge_property("double")  # create new edge property for inverted weights
+    for e in graph.edges(): # for all the graph edges
+        weight_inv[e] = 1.0 / graph.ep.weight[e]  # get inverted weights
+    graph.ep['weight_inv'] = weight_inv # set inverted weights as graph edge property
+    hist = distance_histogram(graph, weight = graph.ep.weight_inv, bins=[0,0.5])   # get distance histogram with inverted weights
+
+    plt.plot(hist[1][:-1], hist[0], label=label, color=colour)  # create plot from histogram
+    plt.xlabel("Distance")  # set x-axis label
+    plt.ylabel("Density")  # set y-axis label
+    plt.title("Distribution of shortest network distances")  # set title
+    plt.legend()  # show legend
+    plt.grid(alpha=0.3)  # make the grid slightly transparent
+
+
 def draw_graph_anatomical(graph, positions, colours, absolute_edges, output_file):
     """
-    Draw a graph with an anatomical layout
-    Vertices coloured by group membership; stronger edges are brighter, thicker and closer to top of layer
-    requires: graph-tool, matplotlib.cm
-    :param graph: a graph-tool graph object
-    :param positions: a pandas DataFrame with columns 'x' and 'y'
-    :param colours: a dictionary with numerical keys corresponding to hex code colours
-    :param absolute_edges: if True, scale edge widths but keeping absolute differences; otherwise use min-max scaling
-    :param output_file: where to save the figure
-    :return: a figure
+    Draws a graph with an anatomical layout, with scaled edge widths and group-coloured vertices.
+
+    Parameters:
+    - graph (graph-tool graph): a graph.
+    - positions (DataFrame): two-dimensional coordinate data for vertices with columns 'x' and 'y'.
+    - colours (dict): numerical keys corresponding to hex code colours.
+    - absolute_edges (bool): if True, scale edge widths but keeping absolute differences; otherwise use min-max scaling.
+    - output_file (str): file to save the figure.
+
+    Returns:
+    - (plt): A matplotlib figure.
     """
-    def hex_to_rgb(hex_color): # helper function to convert hex colour to RGB tuple
-        hex_color = hex_color.lstrip('#')
-        return tuple(int(hex_color[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
 
-    # set vertex positions and colours:
-    pos = graph.new_vertex_property("vector<double>") # create new vertx property for position
-    color = graph.new_vertex_property("vector<double>") # create new
-    for i, vertex in enumerate(graph.vertices()): # for each vertex
-        pos[vertex] = (positions.loc[i, 'x'], positions.loc[i, 'y']) # get x and y positions
-        color[vertex] = hex_to_rgb(colours[positions.loc[i, 'Region']]) # set colour by group
+    # Helper function to convert hex colour to RGB tuple
+    def hex_to_rgb(hex_color):
+        hex_color = hex_color.lstrip('#') # get rid of hash symbol
+        return tuple(int(hex_color[i:i + 2], 16) / 255.0 for i in (0, 2, 4)) # calculate RGB values
 
-    # set edge colours:
-    edge_color= graph.new_edge_property("vector<double>") # initialise new edge property to store edge colours
-    for e in graph.edges(): # for each edge
-        weight_val = graph.ep.weight[e] # acquire edge weight
-        if 'pos' in output_file:
-           colourmap = cm.Reds
-        elif 'neg' in output_file:
-            colourmap = cm.Blues
-        else:
-            colourmap = cm.viridis
-        rgba = list(colourmap(weight_val)) # get colour from chosen matplotlib colourmap
-        rgba[3] = (weight_val * 2) # set alpha values, scaled
-        edge_color[e] = rgba # set edge colour
-    graph.ep["color"] = edge_color # set edge colours as edge property
+    # Set vertex positions and colours
+    pos = graph.new_vertex_property("vector<double>")  # create new vertex property for position
+    color = graph.new_vertex_property("vector<double>")  # create new vertex property for colour
+    for i, vertex in enumerate(graph.vertices()):  # for each vertex
+        pos[vertex] = (positions.loc[i, 'x'], positions.loc[i, 'y'])  # get x and y positions
+        color[vertex] = hex_to_rgb(colours[positions.loc[i, 'Region']])  # set colour by group
 
-    # set edge widths
-    if absolute_edges:
-        # scaled absolute values
-        edge_width = graph.new_edge_property("double")
-        edge_width.a = (graph.ep.weight.a**3)*20
+    # Set edge colours
+    edge_color= graph.new_edge_property("vector<double>")  # initialise new edge property to store edge colours
+    for e in graph.edges():  # for each edge
+        weight_val = graph.ep.weight[e]  # acquire edge weight
+        if 'pos' in output_file:  # if creating a positive graph
+           colourmap = cm.Reds  # use red colour gradient
+        elif 'neg' in output_file:  # if creating a negative graph
+            colourmap = cm.Blues  # use blue colour gradient
+        else:  # otherwise
+            colourmap = cm.viridis  # use the viridis colour gradient for absolute edges
+        rgba = list(colourmap(weight_val))  # get colour from chosen matplotlib colourmap
+        rgba[3] = (weight_val * 2)  # set alpha values, scaled to enhance visibility
+        edge_color[e] = rgba  # set edge colour
+    graph.ep["color"] = edge_color  # set edge colours as edge property
 
-    else:
-        # min-max scaling
-        edge_width = prop_to_size(graph, graph.ep.weight, mi = 0.1, ma = 4, power = 3, log = False)
+    # Set edge widths
+    if absolute_edges:  # if using absolute partial correlations
+        edge_width = graph.new_edge_property("double")  # create new edge property for width
+        edge_width.a = (graph.ep.weight.a**3)*20  # desired non-linear scaling
 
-    graph_draw( # draw the graph
-        graph,
-        pos=pos, # set vertex positions
-        vertex_fill_color=color, # set vertex fill colours
-        edge_color=graph.ep.color, # refer to edge colours
-        edge_pen_width=edge_width,
-        eorder=graph.ep.weight, # set edge order (largest on top)
-        vertex_color = 'black', # set vertex stroke colour
-        vertex_size = 10, # set vertex size
-        output_size = (800,800), # set vertex colour
-        output = output_file
+    else:  # if using signed partial correlations
+        edge_width = prop_to_size(graph, graph.ep.weight, mi=0.1, ma=4, power=3, log=False)  # use desired min-max scaling
+
+    # Draw the graph
+    graph_draw(
+        graph,  # input graph
+        pos=pos,  # set vertex positions
+        vertex_fill_color=color,  # set vertex fill colours
+        edge_color=graph.ep.color,  # refer to edge colours
+        edge_pen_width=edge_width,  # set edge widths
+        eorder=graph.ep.weight,  # set edge order (largest on top)
+        vertex_color='black',  # set vertex stroke colour
+        vertex_size=10,  # set vertex size
+        output_size=(800, 800),  # set plot size
+        output=output_file  # set where to save the plot
     )
 
 def euclidean_distance(x1, y1, x2, y2):
+    """
+    Calculates the two-dimensional Euclidean distance between two points.
+
+    Parameters:
+    - x1 (float): x coordinate of first point.
+    - y1 (float): y coordinate of first point.
+    - x2 (float): x coordinate of second point.
+    - y2 (float): y coordinate of second point.
+
+    Returns:
+    - float: Euclidean distance between two points.
+    """
     return np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
 
 def get_dists(positions, name):
     """
-    Get 2D physical distances between all vertices
-    :param positions: a pandas DataFrame with columns 'x' and 'y' and a column of vertex names
-    :param name: a string giving the vertex type name
-    :return: a pandas DataFrame with distances between all vertices
+    Calculates two-dimensional physical distances between all vertices of a network.
+
+    Parameters:
+    - positions (DataFrame): Two-dimensional coordinate data for vertices with columns 'x' and 'y'.
+    - name (string): Name of the vertex type.
+
+    Returns:
+    - DataFrame: two-dimensional physical distances between all vertices.
     """
+
     area_pairs = list(itertools.product(positions[name], repeat=2))  # get pairs of areas
     distances = []  # initialise distances
-    for (area1, area2) in area_pairs:  # for each area in each pair
-        x1, y1 = positions[positions[name] == area1][['x', 'y']].values[
-            0]  # X and Y values for area 1
-        x2, y2 = positions[positions[name] == area2][['x', 'y']].values[
-            0]  # X and Y values for area 2
-        distance = euclidean_distance(x1, y1, x2, y2)  # euclidean distance of pair
+    for (area1, area2) in area_pairs:  # for each area in each pair of areas
+        x1, y1 = positions[positions[name] == area1][['x', 'y']].values[0]  # x and y values for area 1
+        x2, y2 = positions[positions[name] == area2][['x', 'y']].values[0]  # x and y values for area 2
+        distance = euclidean_distance(x1, y1, x2, y2)  # get Euclidean distance of pair
+        # add distance to list
         distances.append({
-            'pair': f"{area1}-{area2}",  # create data
+            'pair': f"{area1}-{area2}",
             'area_1': area1,
             'area_2': area2,
             'distance': distance
         })
     distances = pd.DataFrame(distances)  # convert to dataframe
-    return(distances)
+    return distances
+
+
+def permutation_test_dist(dists1, dists2, groupname, test_direction, n_permutations):
+    # Combine the data
+    combined_dists = pd.concat([dists1, dists2])
+    combined_dists['Group'] = ['Control'] * len(dists1) + [groupname] * len(dists2)
+
+    # Observed difference
+    observed_diffs = dists1['weight'] - dists2['weight']
+    observed_diff = observed_diffs.mean()
+    print('Mean observed difference:')
+    print(observed_diff)
+
+    # Run permutations
+    null_diffs = np.zeros(n_permutations)
+    for i in range(n_permutations):
+        permuted = combined_dists.copy()
+        permuted['Group'] = np.random.permutation(permuted['Group'])
+
+        mean_control = permuted[permuted['Group'] == 'Control']['weight'].mean()
+        mean_treatment = permuted[permuted['Group'] == groupname]['weight'].mean()
+        null_diffs[i] = mean_control - mean_treatment
+
+    print('Mean null difference:')
+    print(np.mean(null_diffs))
+
+    # Calculate effect size
+    null_mean = np.mean(null_diffs)
+    null_std = np.std(null_diffs, ddof=1)
+    effect_size = (observed_diff - null_mean) / null_std if null_std > 0 else np.nan
+
+    # P-value
+    if test_direction == "greater":
+        p_value = np.mean(null_diffs >= observed_diff)
+    elif test_direction == "less":
+        p_value = np.mean(null_diffs <= observed_diff)
+    else:
+        raise ValueError("Invalid test direction")
+
+    # Display results
+    print('P-values:')
+    print(p_value)
+    print('Effect sizes:')
+    print(effect_size)
+
+    return p_value, effect_size
+
+
+
+
 
 def weight_by_dist(cormat, dists, plot = True):
     """
-    Merge edge weights with their physical distances
-    :param cormat: a pandas DataFrame of vertex correlations
-    :param dists: a pandas DataFrame with distances between all vertices
-    :return: a pandas DataFrame of weight-distance combinations, and a scatterplot
+    Combines graph edge weights with their physical distances.
+
+    Parameters:
+    - cormat (DataFrame): A correlation matrix containing the edge weights used to construct a graph.
+    - dists (DataFrame): Physical distances between all pairs of vertices.
+    - plot (bool): If True, plot the edge weights as a function of distance.
+
+    Returns:
+    - DataFrame: Merged weight-distance combinations.
+    - plt: Scatterplot of edge weights as a function of distance.
     """
-    flatmat = cormat.reset_index().melt(id_vars='index', var_name='area_1',value_name='weight')  # convert correlation matrix to long form
 
-    dists['area_1'] = dists['area_1'].astype(str)
-    dists['area_2'] = dists['area_2'].astype(str)
+    # Convert the correlation matrix into long form for merging with weights
+    flatmat = cormat.reset_index().melt(id_vars='index',
+                                        var_name='area_1',
+                                        value_name='weight')
 
-    graph_dist = pd.merge(flatmat, dists, left_on=['index', 'area_1'], right_on=['area_2', 'area_1'], how='left')  # merge distance and weight data
-    graph_dist['pair'] = graph_dist.apply(lambda row: tuple(sorted([row['index'], row['area_1']])), axis=1) # recreate 'pair' column by reordering areas
+    dists['area_1'] = dists['area_1'].astype(str)  # ensure area names are strings
+    dists['area_2'] = dists['area_2'].astype(str)  # ensure area names are strings
+
+    # Merge weights with distances
+    graph_dist = pd.merge(flatmat, dists, left_on=['index', 'area_1'],
+                          right_on=['area_2', 'area_1'],
+                          how='left')
+
+    # Re-create the area pair column by re-ordering the areas
+    graph_dist['pair'] = graph_dist.apply(lambda row: tuple(sorted([row['index'], row['area_1']])), axis=1)
     graph_dist = graph_dist[graph_dist['index'] != graph_dist['area_1']]  # drop self-loops
     edge_dist = graph_dist.drop_duplicates(subset='pair').reset_index(drop=True)  # drop repeated pairs
 
-    if plot:
-        fig, axs = plt.subplots(1, 1, figsize=(8, 8))
-        axs.scatter(edge_dist['distance'], edge_dist['weight'], alpha=0.8, s=1.5, c=edge_dist['weight'])  # plot of weight over distance
-        axs.set_xlabel('Distance')
-        axs.set_ylabel('pcor')
+    if plot:  # if a plot of weight-distance combinations is desired
+        fig, axs = plt.subplots(1, 1, figsize=(8, 8))  # initialise plot
+        axs.scatter(edge_dist['distance'], edge_dist['weight'],  # plot of weight over distance
+                    alpha=0.8, s=1.5, c=edge_dist['weight'])  # set transparency and colour
+        axs.set_xlabel('Distance')  # set x-axis label
+        axs.set_ylabel('pcor')  # set y-axis label
 
     return graph_dist
 
-# Function to calculate SWP and delta for a graph, given the correlation matrix and distances, and observed clustering and path length of graph in question
-# creates a distance-based lattice graph and a single random rewire for the null models
+
 def SWP(cormat, dists, C_obs, L_obs,report = True):
     """
-    Calculate small-world propensity and delta for a graph using a distance-based lattice and single random rewire as null models
-    :param cormat: a pandas DataFrame of vertex correlations
-    :param dists: a pandas DataFrame with distances between all vertices
-    :param C_obs: the observed clustering coefficient for the graph corresponding to cormat
-    :param L_obs: the observed path length for the graph corresponding to cormat
-    :return: tuple: SWP, delta
+    Calculates small-world propensity (SWP) and delta of a graph.
+    Uses a distance-based lattice and a single random rewire as null models, preserving edge weight distribution.
+
+    Parameters:
+    - cormat (DataFrame): A correlation matrix containing the edge weights used to construct the graph.
+    - dists (DataFrame): Physical distances between all pairs of vertices of the graph.
+    - C_obs (float): The observed clustering coefficient of the graph.
+    - L_obs (float): The observed path length of the graph.
+    - report (bool): If True, prints C and L for null models and delta C and delta L.
+
+    Returns:
+    - DataFrame: SWP and delta values.
     """
 
-    def calculate_path_length(graph): # helper function to get characteristic path length
+    # Helper function to return characteristic path length of a graph
+    def calculate_path_length(graph):
         weight_inv = graph.new_edge_property("double")  # create new edge property for inverted weights
-        for e in graph.edges():
+        for e in graph.edges():  # for each edge in the graph
             weight_inv[e] = 1.0 / graph.ep.weight[e]  # get inverted weights
-        graph.ep['weight_inv'] = weight_inv
-        distances = shortest_distance(graph, weights=graph.ep.weight_inv)
-        distances_sum = 0
+        graph.ep['weight_inv'] = weight_inv  # set as edge property
+        distances = shortest_distance(graph, weights=graph.ep.weight_inv)  # get shortest distances
+        distances_sum = 0  # initialise a sum of shortest distances
         for j in range(graph.num_vertices()):  # for all vertices
             for k in range(j + 1, graph.num_vertices()):  # to all other vertices
                 if distances[j][k] != 0:  # if shortest distance is not 0
-                    distances_sum += distances[j][k]
-        L = distances_sum / ((graph.num_vertices() - 1) * graph.num_vertices())
+                    distances_sum += distances[j][k]  # add distance to sum
+        L = distances_sum / ((graph.num_vertices() - 1) * graph.num_vertices())  # characteristic path length
 
         return L
 
-    # generate lattice graph #
+    # Generate lattice graph null model
+    distances_sort = dists.sort_values(by=['distance'], ascending=[True])  # sort distances from shortest to largest
+    distances_sort = distances_sort[['area_1', 'area_2', 'distance']].reset_index(drop=True)  # get relevant columns
+    lattice_weights = dists['weight'].sort_values(ascending = False).reset_index(drop=True)  # get sorted weights
+    distances_sort['weight'] = lattice_weights  # combine sorted distances and sorted weights
 
-    # sort values so shortest distances have highest weights
-    distances_sort = dists.sort_values(by=['distance'], ascending=[True])[['area_1', 'area_2', 'distance']].reset_index(drop=True) # sort distances
-    lattice_weights = dists['weight'].sort_values(ascending = False).reset_index(drop=True) # get sorted weights
-    distances_sort['weight'] = lattice_weights # add sorted weights to sorted distances
+    areas = pd.unique(dists[['area_1', 'area_2']].values.ravel('K'))  # get unique area names
+    cormat_latt = pd.DataFrame(index=areas, columns=areas, dtype=float).fillna(1)  # initialise a lattice matrix
+    for _, row in distances_sort.iterrows():  # for each sorted distance
+        cormat_latt.at[row['area_1'], row['area_2']] = row['weight']  # add partial correlations to matrix
+        cormat_latt.at[row['area_2'], row['area_1']] = row['weight']  # add the symmetric entry
+    cormat_latt.reindex(index=cormat.index, columns=cormat.columns)  # reorder matrix to match original order
 
-    # change distances object back to covariance matrix and fill with sorted weights
-    areas = pd.unique(dists[['area_1', 'area_2']].values.ravel('K'))
-    cormat_latt = pd.DataFrame(index=areas, columns=areas, dtype=float).fillna(1)
-    for _, row in distances_sort.iterrows():
-        cormat_latt.at[row['area_1'], row['area_2']] = row['weight']
-        cormat_latt.at[row['area_2'], row['area_1']] = row['weight']
+    graph_latt = Graph(scipy.sparse.lil_matrix(cormat_latt), directed=False)  # create lattice graph
+    remove_self_loops(graph_latt)  # remove self-loops
 
-        cormat_latt.reindex(index=cormat.index, columns=cormat.columns) # reorder matrix to match original order
+    # Generate random graph null model
+    non_diag = [cormat.iloc[j, k]  # take entries from the correlation matrix
+                for j in range(cormat.shape[0])  # from rows
+                for k in range(cormat.shape[1])  # and from columns
+                if j != k]  # but not the diagonal
+    np.random.shuffle(non_diag)  # randomly shuffle the weights in place
+    cormat_rand = cormat.copy()  # copy the structure of the input matrix
+    v = 0  # set a counter for vertices
+    for j in range(cormat.shape[0]):  # for all rows
+        for k in range(cormat.shape[1]):  # to all columns
+            if j != k:  # if not diagonal entry
+                cormat_rand.iloc[j, k] = non_diag[v]  # then populate with shuffled weights
+                v += 1  # add one to counter
+    graph_rand = Graph(scipy.sparse.lil_matrix(cormat_rand), directed=False)  # create random graph
 
+    # Get network metrics of null models
+    C_latt = global_clustering(graph_latt, weight = graph_latt.ep.weight)[0]  # global clustering, lattice graph
+    C_rand = global_clustering(graph_rand, weight = graph_rand.ep.weight)[0]  # global clustering, random graph
+    L_latt = calculate_path_length(graph_latt)  # path length, lattice graph
+    L_rand = calculate_path_length(graph_rand)  # path length, random graph
 
-    graph_latt = Graph(scipy.sparse.lil_matrix(cormat_latt), directed=False) # create lattice graph
-    remove_self_loops(graph_latt) # remove self-loops
+    if report: # if we want outputs for sanity checking; these should be similar to observed metrics
+        print('C_latt, C_rand, L_latt, L_rand')  # print metric names
+        print(C_latt, C_rand, L_latt, L_rand)  # print null metrics
 
-    # generate random graph  #
+    # Calculate divergences of observed graph from lattice and random models
+    delta_C = np.clip(((C_latt - C_obs) / (C_latt - C_rand)), a_min=0, a_max=1)  # clustering divergence
+    delta_L = np.clip(((L_obs - L_rand) / (L_latt - L_rand)), a_min=0, a_max=1)  # path length divergence
 
-    non_diag = [cormat.iloc[j, k] for j in range(cormat.shape[0]) for k in range(cormat.shape[1]) if j != k]
-    np.random.shuffle(non_diag)
-    cormat_rand = cormat.copy()
-    v = 0
-    for j in range(cormat.shape[0]):
-        for k in range(cormat.shape[1]):
-            if j != k:
-                cormat_rand.iloc[j, k] = non_diag[v]
-                v += 1
-    cormat_rand = cormat_rand.copy()
-    graph_rand = Graph(scipy.sparse.lil_matrix(cormat_rand), directed=False)
+    if report: # if we want outputs for sanity checking; should be between 0 and 1
+        print('delta_C, delta_L')  # print divergence names
+        print(delta_C, delta_L)  # print divergences
 
-    # calculate clustering coefficients #
-
-    C_latt = global_clustering(graph_latt, weight = graph_latt.ep.weight)[0] # standard global clustering based on graphs from partial correlations
-    C_rand = global_clustering(graph_rand, weight = graph_rand.ep.weight)[0] # standard global clustering based on graphs from partial correlations
-
-
-    # calculate characteristic path length
-
-    L_latt = calculate_path_length(graph_latt)
-    L_rand = calculate_path_length(graph_rand)
-
-    if report:
-        print(C_latt, C_rand, L_latt, L_rand) # sanity check
-
-    # calculate divergences from lattice and random models
-    delta_C = np.clip((C_latt - C_obs) / (C_latt - C_rand), 0, 1)
-    delta_L = np.clip((L_obs - L_rand) / (L_latt - L_rand), 0, 1)
-
-    # calculate SWP
-    SWP = np.sqrt((delta_C**2 + delta_L**2) / 2) # calculate SWP
-    alpha = np.arctan(delta_L / delta_C) # get angle of divergence vector
-    delta = (((4 * alpha) / np.pi) - 1) # get delta value
-    delta = np.clip(delta, -1, 1) # set range
-
-    # put into DataFrame
-    SWP_results = pd.DataFrame(np.array([[SWP, delta]]), columns=['SWP', 'delta'])
+    # Calculate SWP and delta
+    SWP = np.sqrt((delta_C**2 + delta_L**2) / 2)  # calculate SWP
+    alpha = np.arctan(delta_L / delta_C)  # get angle of divergence vector
+    delta = (((4 * alpha) / np.pi) - 1)  # get delta value
+    delta = np.clip(delta, -1, 1)  # set range for delta
+    SWP_results = pd.DataFrame(np.array([[SWP, delta]]), columns=['SWP', 'delta'])  # place into DataFrame
 
     return SWP_results
 
+def cohend(data1, data2):
+    """
+    Calculates Cohen's d effect size for two the difference between two means.
+
+    Parameters:
+    - data1 (array-like): Data for one group.
+    - data2 (array-like): Data for another group.
+
+    Returns:
+    - float: Cohen's d effect size.
+    """
+
+    n1 = len(data1)  # sample number for first group
+    n2 = len(data2)  # sample number for second group
+    mean1 = np.mean(data1)  # mean of first group
+    mean2 = np.mean(data2)  # mean of second group
+    std1 = np.std(data1, ddof=1)  # standard deviation for first group
+    std2 = np.std(data2, ddof=1)  # standard deviation for second group
+
+    stdpool = np.sqrt(((n1 - 1)*std1 + (n2 - 1)*std2) / (n1+n2-2))  # get pooled standard deviation
+    cohen_d = (mean1 - mean2) / stdpool  # calculate Cohen's d
+
+    return cohen_d
+
 def hedges_g(data, population_mean):
     """
-    Calculate Hedges' g for a one-sample test.
-    :param: data (array-like): The sample data.
-    :param: population_mean (float): The hypothesized population mean.
-    :return: float: Hedges' g.
+    Calculates Hedges' g for a one-sample test.
+
+    Parameters:
+    - data (array-like): The sample data.
+    - population_mean (float): The population mean for comparison.
+
+    Returns:
+    - float: Hedges' g for a one-sample test.
     """
-    # sample statistics
-    n = len(data)
-    sample_mean = np.mean(data)
-    sample_std = np.std(data, ddof=1)  # Use ddof=1 for sample standard deviation
 
-    # get Cohen's d
-    cohen_d = (sample_mean - population_mean) / sample_std
+    n = len(data)  # sample size for data
+    sample_mean = np.mean(data)  # get sample mean
+    sample_std = np.std(data, ddof=1)  # get sample standard deviation
 
-    # get the correction factor for Hedges' g
-    correction_factor = 1 - (3 / (4 * n - 1))
+    cohen_d = (sample_mean - population_mean) / sample_std  # calculate one-sample Cohen's d
+    correction_factor = 1 - (3 / (4 * n - 1))  # calculate correction factor for Hedges' g
+    hedges_g = cohen_d * correction_factor  # calculate Hedges' g
 
-    # get Hedges' g
-    hedges_g = cohen_d * correction_factor
     return hedges_g
 
 def draw_graph_betweenclust(graph, positions, absolute_edges, output_file):
     """
-    Draw a graph where vertex size and colour scale with betweenness and local clustering
-    :param graph: a graph-tool graph object
-    :param positions: a pandas DataFrame with columns 'x' and 'y'
-    :param absolute_edges: if True, scale edge widths but keeping absolute differences; otherwise use min-max scaling
-    :param output_file: where to save the figure
-    :return: a graph figure
+    Draws a graph where vertex size and colour scale with betweenness and local clustering.
+
+    Parameters:
+    - graph (graph-tool graph): A graph.
+    - positions (DataFrame): Two dimensional coordinate data with columns 'x' and 'y'.
+    - absolute_edges (bool): If True, scale edge widths but keeping absolute differences; otherwise use min-max scaling.
+    - output_file (str): Where to save the graph figure.
+
+    Returns:
+    - plt: A graph figure.
     """
-    # get inverted weights
-    weight_inv = graph.new_edge_property("double") # create new edge property for inverted weights
-    for e in graph.edges():
-        weight_inv[e] = 1.0 / graph.ep.weight[e] # get inverted weights
-    graph.ep['weight_inv'] = weight_inv
 
-    # calculate local clustering coefficients
-    clusts = local_clustering(graph, weight=graph.ep.weight).a
-    clusts = clusts**7 * 200000 # scale for visualisation - try to get one white in syn, one black in control
-    colors = cm.inferno(clusts)[:, :3]
-    vertex_color = graph.new_vertex_property("vector<double>")
-    vertex_color.set_2d_array(colors.T)
+    weight_inv = graph.new_edge_property("double")  # create new edge property for inverted weights
+    for e in graph.edges():  # for each edge in graph
+        weight_inv[e] = 1.0 / graph.ep.weight[e]  # get inverted weights
+    graph.ep['weight_inv'] = weight_inv  # set as edge property
 
-    # calculate betweennesss
-    vb, _ = betweenness(graph, weight = graph.ep.weight_inv)
-    vb_vals = vb.a
-    vb_vals = vb_vals * 200 + 12 # scale for visualisation
-    vertex_size = graph.new_vertex_property("double")
-    vertex_size.a = vb_vals
+    # Vertex colour by local clustering
+    clusts = local_clustering(graph, weight=graph.ep.weight).a  # calculate weighted local clustering
+    clusts = clusts**7 * 200000  # scale for visualisation
+    colors = cm.inferno(clusts)[:, :3]  # set colours using inferno gradient
+    vertex_color = graph.new_vertex_property("vector<double>")  # create a new vertex property for colour
+    vertex_color.set_2d_array(colors.T)  # set vertex colours
 
-    # set vertex positions
-    pos = graph.new_vertex_property("vector<double>")
-    for i, vertex in enumerate(graph.vertices()):
-        pos[vertex] = (positions.loc[i, 'x'], positions.loc[i, 'y'])
+    # Vertex size by betweenness
+    vb, _ = betweenness(graph, weight = graph.ep.weight_inv)  # get vertex betweenness
+    vb_vals = vb.a  # get betweenness values
+    vb_vals = vb_vals * 200 + 12  # scale for visualisation
+    vertex_size = graph.new_vertex_property("double")  # create new vertex property for size
+    vertex_size.a = vb_vals  # set vertex sizes
 
-    # set edge colours
-    edge_color= graph.new_edge_property("vector<double>") # initialise new edge property to store edge colours
-    for e in graph.edges():
-        weight_val = graph.ep.weight[e] # acquire edge weight
-        rgba = list(cm.viridis(weight_val)) # get colour from chosen matplotlib colourmap
-        rgba[3] = (weight_val * 2) # set alpha values, scaled
-        edge_color[e] = rgba
-    graph.ep["color"] = edge_color # set edge colours
+    # Set vertex positions
+    pos = graph.new_vertex_property("vector<double>")  # create new vertex property for positions
+    for i, vertex in enumerate(graph.vertices()):  # for each vertex in graph
+        pos[vertex] = (positions.loc[i, 'x'], positions.loc[i, 'y'])  # set two-dimensional position
 
-    # set edge widths
-    if absolute_edges:
-        # scaled absolute values
-        edge_width = graph.new_edge_property("double")
-        edge_width.a = (graph.ep.weight.a**3)*20
-    else:
-        # min-max scaling
-        edge_width = prop_to_size(graph, graph.ep.weight, mi = 0.1, ma = 4, power = 3, log = False)
+    # Set edge colours
+    edge_color = graph.new_edge_property("vector<double>")  # initialise new edge property to store edge colours
+    for e in graph.edges():  # for each edge in graph
+        weight_val = graph.ep.weight[e]  # acquire edge weight
+        rgba = list(cm.viridis(weight_val))  # get colour from chosen matplotlib colourmap
+        rgba[3] = (weight_val * 2)  # set alpha values, scaled
+        edge_color[e] = rgba  # set edge colour
+    graph.ep["color"] = edge_color  # set edge colours to property
 
-    # draw graphs
+    # Set edge widths
+    if absolute_edges:  # if using absolute edge weights
+        edge_width = graph.new_edge_property("double")  # create new vertex property for edge width
+        edge_width.a = (graph.ep.weight.a**3)*20  # non-linear scaling
+    else:  # if not using absolute edge weights
+        edge_width = prop_to_size(graph, graph.ep.weight, mi = 0.1, ma = 4, power = 3, log = False)  # min-max scaling
+
+    # Draw graph
     graph_draw(
-        graph,
-        pos=pos, # set vertex positions
-        vertex_fill_color = vertex_color,
-        edge_color = graph.ep.color, # refer to edge colours
-        edge_pen_width = edge_width,
-        eorder = graph.ep.weight, # set edge order (largest on top)
-        vertex_color = 'black',
-        vertex_size = vertex_size,
-        output_size = (800,800),
-        output = output_file
+        graph,  # input graph
+        pos=pos,  # set vertex positions
+        vertex_fill_color=vertex_color,  # set vertex fill colour
+        edge_color=graph.ep.color,  # set edge colours
+        edge_pen_width=edge_width,  # set edge widths
+        eorder=graph.ep.weight,  # set edge order (largest on top)
+        vertex_color='black',  # set vertex stroke colour
+        vertex_size=vertex_size,  # set vertex size
+        output_size=(800,800),  # set size of plot
+        output=output_file  # where to save the plot
     )
 
 def draw_graph_difference(graphs, positions, absolute_edges, output_file):
     """
-    Draw a graph from two input graphs such that the edges represent the difference in correlation, vertex colour represents difference in local clustering and vertex size represents the difference in betweenness
-    :param graphs: a list of graph-tool graph objects
-    :param positions: a pandas DataFrame with columns 'x' and 'y'
-    :param absolute_edges: if True, scale edge widths but keeping absolute differences; otherwise use min-max scaling
-    :param output_file: where to save the figure
-    :return: a graph figure
-    """
-    for graph in graphs:
-        # get inverted weights
-        weight_inv = graph.new_edge_property("double") # create new edge property for inverted weights
-        for e in graph.edges():
-            weight_inv[e] = 1.0 / graph.ep.weight[e] # get inverted weights
-        graph.ep['weight_inv'] = weight_inv
-
-        # calculate local clustering coefficients
-        graph.vp['local_clustering'] = local_clustering(graph, weight=graph.ep.weight)
-        #calculate betweenness
-        vb, eb = betweenness(graph, weight = graph.ep.weight_inv)
-        graph.vp['v_between'] = vb
-
-    # get difference values: absolute difference of synesthete - control
-    edge_diffs = abs(graphs[1].ep.weight.a - graphs[0].ep.weight.a)
-    clust_diffs = abs(graphs[1].vp.local_clustering.a - graphs[0].vp.local_clustering.a)
-    between_diffs = abs(graphs[1].vp.v_between.a - graphs[0].vp.v_between.a)
-
-    # create new graph and set properties
-    graph = graphs[0].copy()
-
-    # set weights
-    graph.ep.weight.a = edge_diffs
-
-    # set vertex colours
-    colors = cm.inferno(np.log1p(clust_diffs)*20)[:, :3] # log-transform differences
-    vertex_color = graph.new_vertex_property("vector<double>")
-    vertex_color.set_2d_array(colors.T)
-
-    # set vertex sizes
-    vertex_size = graph.new_vertex_property("double")
-    vertex_size.a = np.log1p(between_diffs)*210 + 8
-
-    # set vertex positions
-    pos = graph.new_vertex_property("vector<double>")
-    for i, vertex in enumerate(graph.vertices()):
-        pos[vertex] = (positions.loc[i, 'x'], positions.loc[i, 'y'])
-
-    # set edge colours
-    edge_color= graph.new_edge_property("vector<double>") # initialise new edge property to store edge colours
-    for e in graph.edges():
-        weight_val = graph.ep.weight[e] # acquire edge weight
-        rgba = list(cm.viridis(weight_val)) # get colour from chosen matplotlib colourmap
-        rgba[3] = (weight_val * 2) # set alpha values
-        edge_color[e] = rgba
-    graph.ep["color"] = edge_color # set edge colours
-
-    # set edge widths
-    if absolute_edges:
-        # scaled absolute values
-        edge_width = graph.new_edge_property("double")
-        edge_width.a = (graph.ep.weight.a**3)*20
-    else:
-        # min-max scaling
-        edge_width = prop_to_size(graph, graph.ep.weight, mi = 0.1, ma = 4, power = 3, log = False)
-
-    # draw graph
-    graph_draw(
-        graph,
-        pos=pos, # set vertex positions
-        vertex_fill_color = vertex_color,
-        edge_color = graph.ep.color, # refer to edge colours
-        edge_pen_width = prop_to_size(graph.ep.weight, 0.01, 4, power = 4, log = False), # set edge widths based on weights
-        eorder = graph.ep.weight, # set edge order (largest on top)
-        vertex_color = 'black',
-        vertex_size = vertex_size,
-        output_size = (800,800),
-        output=output_file
-    )
-    
-def permutation_test_metrics(data1, data2, observed_metrics, sign=None, n_permutations=1000, test_directions=None):
-    """
-    Perform a permutation test by randomizing group labels and computing metric differences.
+    Draws a graph representing the differences between two input graphs.
+    Edges represent the difference in correlation, vertex colour local clustering and vertex size betweenness.
 
     Parameters:
-    - data1, data2: Pandas DataFrames containing observations for each group. Must have a 'Group' column.
-    - n_permutations: Number of permutations to perform.
+    - graphs (list): A list of two graph-tool graphs.
+    - positions (DataFrame): Two dimensional coordinate data with columns 'x' and 'y'.
+    - absolute_edges (bool): If True, scale edge widths according to absolute weights; otherwise use min-max scaling.
+    - output_file (str): Where to save the graph figure.
+
+    Returns:
+    - plt: A graph figure.
+    """
+
+    for graph in graphs:  # for each of two graphs
+        weight_inv = graph.new_edge_property("double")  # create new edge property for inverted weights
+        for e in graph.edges():  # for each edge in graph
+            weight_inv[e] = 1.0 / graph.ep.weight[e]  # get inverted weights
+        graph.ep['weight_inv'] = weight_inv  # add as property map
+
+        graph.vp['local_clustering'] = local_clustering(graph, weight=graph.ep.weight)  # local clustering
+        vb, eb = betweenness(graph, weight=graph.ep.weight_inv)  # betweenness
+        graph.vp['v_between'] = vb  # set betweenness as property map
+
+    # Get value differences betweenness two graphs
+    edge_diffs = abs(graphs[1].ep.weight.a - graphs[0].ep.weight.a)  # edge weights
+    clust_diffs = abs(graphs[1].vp.local_clustering.a - graphs[0].vp.local_clustering.a)  # local clustering
+    between_diffs = abs(graphs[1].vp.v_between.a - graphs[0].vp.v_between.a)  # betweenness
+
+    # Create new graph and set properties
+    graph = graphs[0].copy()
+
+    # Set edge weights
+    graph.ep.weight.a = edge_diffs  # set weights as differences
+
+    # Set vertex colours
+    colors = cm.inferno(np.log1p(clust_diffs)*20)[:, :3]  # log-transform to enhance differences
+    vertex_color = graph.new_vertex_property("vector<double>")  # set as vertex property
+    vertex_color.set_2d_array(colors.T)  # add colours
+
+    # Set vertex sizes
+    vertex_size = graph.new_vertex_property("double")  # create vertex property for size
+    vertex_size.a = np.log1p(between_diffs)*210 + 8  # log1p transform and scaling to enhance
+
+    # Set vertex positions
+    pos = graph.new_vertex_property("vector<double>")  # create vertex property for position
+    for i, vertex in enumerate(graph.vertices()):  # for each vertex
+        pos[vertex] = (positions.loc[i, 'x'], positions.loc[i, 'y'])  # set two-dimensional position
+
+    # Set edge colours
+    edge_color = graph.new_edge_property("vector<double>")  # create edge property for edge colours
+    for e in graph.edges():  # for each edge
+        weight_val = graph.ep.weight[e]  # acquire edge weight
+        rgba = list(cm.viridis(weight_val))  # get colour from chosen matplotlib colourmap
+        rgba[3] = (weight_val * 2)  # set alpha values, scaled to enhance opacity
+        edge_color[e] = rgba  # set the colour
+    graph.ep["color"] = edge_color  # set edge colours to property map
+
+    # Set edge widths
+    if absolute_edges:  # if using absolute edges
+        edge_width = graph.new_edge_property("double")  # create edge property for edge width
+        edge_width.a = (graph.ep.weight.a**3)*20  # non-linear scaling for width
+    else:  # if using signed edges
+        edge_width = prop_to_size(graph, graph.ep.weight, mi=0.1, ma=4, power=3, log=False)  # use min-max scaling
+
+    # Draw graph
+    graph_draw(
+        graph, # input graph
+        pos=pos,  # use vertex positions
+        vertex_fill_color=vertex_color,  # use vertex colours
+        edge_color=graph.ep.color,  # use to edge colours
+        edge_pen_width=edge_width,  # use edge widths
+        eorder=graph.ep.weight,  # set edge order (largest on top)
+        vertex_color='black',  # set vertex stroke colour
+        vertex_size=vertex_size,  # set vertex size
+        output_size=(800, 800),  # set figure size
+        output=output_file  # where to save the figure
+    )
+    
+def permutation_test_metrics(data1, data2, data_cols, observed_metrics, sign=None, n_permutations=1000, test_directions=None):
+    """
+    Performs a permutation test of network metrics by randomizing group labels and computing metric differences.
+
+    Parameters:
+    - data1 (DataFrame): Wide-form raw data for the control group. Must have a 'Group' column.
+    - data2 (DataFrame): Wide-form raw data for the experimental group. Must have a 'Group' column.
+    - data_cols (slice): Indexes of columns in data that contain brain data.
+    - observed_metrics (DataFrame): Wide-form network metrics for both groups, where control group is row 0 and experimental group is row 1.
+    - sign (str): Whether to form graphs with positive weights ('Positive'), negative weights ('Negative'), or both (None).
+    - n_permutations (int): Number of permutations to perform to construct the null distribution.
+    - test_directions (dict): Directions for one-sided tests. Direction refers to control group.
 
     Returns:
     - A DataFrame with metric differences for each iteration.
     """
 
-    # Compute observed metrics
-    observed_diffs = observed_metrics.iloc[0, :] - observed_metrics.iloc[1, :]  # Difference: Group1 - Group2
-    print('Observed differences:')
-    print(observed_diffs.to_frame().T) # print the observed difference
+    # Get the observed group differences
+    observed_diffs = observed_metrics.iloc[0, :] - observed_metrics.iloc[1, :]  # group 1 - group 2
+    print('Observed differences:')  # print title
+    print(observed_diffs.to_frame().T)  # print the observed differences
 
-    # Store permutation results
-    null_diffs = pd.DataFrame(columns=observed_diffs.index, index=range(n_permutations))
-    combined_data = pd.concat([data1, data2])
-    group_labels = combined_data["Group"].unique()
-    group1_label, group2_label = group_labels
+    # Run permutations
+    null_diffs = pd.DataFrame(columns=observed_diffs.index, index=range(n_permutations))  # to store the null diffs
+    combined_data = pd.concat([data1, data2])  # combine data into one DataFrame
+    group_labels = combined_data["Group"].unique()  # get the group names
+    group1_label, group2_label = group_labels  # get the group names separately
 
-    for i in range(n_permutations):
-        # Shuffle group labels
-        permuted_data = combined_data.copy()
-        permuted_data["Group"] = np.random.permutation(permuted_data["Group"])
+    for i in range(n_permutations):  # for each permutation
+        permuted_data = combined_data.copy()  # copy the combined data
+        permuted_data["Group"] = np.random.permutation(permuted_data["Group"])  # shuffle group labels
 
         # Generate graphs from permuted data
-        # For positive or negative graphs, split by sign then take the first or second graph for each group
-        if sign == 'Positive':
-            graphs = data_to_graphs(permuted_data, groupname=group2_label, split_sign=True)
-            graphs_perm = [graphs[0][0], graphs[1][0]]
-        elif sign == 'Negative':
-            graphs = data_to_graphs(permuted_data, groupname=group2_label, split_sign=True)
-            graphs_perm = [graphs[0][1], graphs[1][1]]
-        # For absolute weights, don't split
-        elif sign is None:
-            graphs_perm = data_to_graphs(permuted_data, groupname=group2_label)
+        if sign == 'Positive':  # if positive-only
+            graphs = data_to_graphs(permuted_data, data_cols=data_cols, groupname=group2_label, split_sign=True)  # convert to graphs
+            graphs_perm = [graphs[0][0], graphs[1][0]]  # take positive-only graphs
+        elif sign == 'Negative':  # if negative-only
+            graphs = data_to_graphs(permuted_data, data_cols=data_cols, groupname=group2_label, split_sign=True)  # convert to graphs
+            graphs_perm = [graphs[0][1], graphs[1][1]]  # take negative-only graphs
+        elif sign is None:  # if using absolute weights
+            graphs_perm = data_to_graphs(permuted_data, data_cols=data_cols, groupname=group2_label)  # convert to graph
 
         # Compute metrics for permuted groups
         permuted_metrics = []  # initialise metric list
@@ -574,14 +731,12 @@ def permutation_test_metrics(data1, data2, observed_metrics, sign=None, n_permut
             metrics = measure_net(graph)  # get the network metrics
             permuted_metrics.append(metrics)  # add net metrics to list
 
-        permuted_metrics = pd.concat(permuted_metrics,ignore_index=True)
-        permuted_diffs = permuted_metrics.iloc[0, :] - permuted_metrics.iloc[1, :]
+        permuted_metrics = pd.concat(permuted_metrics,ignore_index=True)  # put null metrics into DataFrame
+        permuted_diffs = permuted_metrics.iloc[0, :] - permuted_metrics.iloc[1, :]  # calculate the difference
+        null_diffs.iloc[i, :] = permuted_diffs.values  # store the null difference
 
-        # Store null differences
-        null_diffs.iloc[i, :] = permuted_diffs.values
-
-    print('Mean null differences:')
-    print(null_diffs.mean())
+    print('Mean null differences:')  # print title
+    print(null_diffs.mean().to_frame().T)  # print the average null differences for comparison
 
     # Two-tailed P-values, quantile method
     #lower_percentile = diff_df.quantile(0.025)
@@ -591,34 +746,36 @@ def permutation_test_metrics(data1, data2, observed_metrics, sign=None, n_permut
     # Two-tailed P-values, proportional method
     # p_values = (np.abs(null_diffs) >= np.abs(observed_diffs)).mean()
 
-    # One-tailed P-values
-    p_values = pd.DataFrame(columns=observed_diffs.index, index=range(1)) # Store P-values
-    effect_sizes = pd.DataFrame(columns=observed_diffs.index, index=range(1))  # Store Cohen's d
-    for metric in observed_diffs.index:
-        direction = test_directions.get(metric, "greater")  # Default to greater if not specified
-        null_distribution = null_diffs[metric].dropna()  # Drop NaNs if any
+    # One-tailed tests
+    p_values = pd.DataFrame(columns=observed_diffs.index, index=range(1))  # to store P-values
+    effect_sizes = pd.DataFrame(columns=observed_diffs.index, index=range(1))  # to store Cohen's d
+    for metric in observed_diffs.index:  # for each metric
+        direction = test_directions.get(metric, "greater")  # default test direction to greater if not specified
+        null_distribution = null_diffs[metric].dropna()  # drop NaNs if any
 
-        # Compute effect sizes
-        null_mean = null_distribution.mean()
-        null_std = null_distribution.std()
-        cohen_d = (observed_diffs[metric] - null_mean) / null_std if null_std > 0 else np.nan
-        effect_sizes[metric] = cohen_d
+        # Calculate effect sizes
+        null_mean = null_distribution.mean()  # get the null distribution mean
+        null_std = null_distribution.std()  # get the null distribution standard deviation
+        cohen_d = (observed_diffs[metric] - null_mean) / null_std if null_std > 0 else np.nan  # Cohen's d
+        effect_sizes[metric] = cohen_d  # store Cohen's d
 
-        if direction == "greater":
+        # Calculate P-values
+        if direction == "greater":  # if direction of control group is greater
             # quantile method:
             #threshold = np.percentile(null_diffs[metric], 95)
             #p_values[metric] = np.mean(observed_diff[metric] > threshold)
             # proportional method:
-            p_values[metric] = (null_diffs[metric] >= observed_diffs[metric]).mean()
+            p_values[metric] = (null_diffs[metric] >= observed_diffs[metric]).mean()  # P = null diffs > observed diffs
         elif direction == "less":
             # quantile method:
             #threshold = np.percentile(null_diffs[metric], 5)
             #p_values[metric] = np.mean(observed_diff[metric] < threshold)
             # proportional method:
-            p_values[metric] = (null_diffs[metric] <= observed_diffs[metric]).mean()
+            p_values[metric] = (null_diffs[metric] <= observed_diffs[metric]).mean()  # P = null diffs < observed diffs
         else:
-            raise ValueError(f"Invalid test direction for metric '{metric}': {direction}")
+            raise ValueError(f"Invalid test direction for metric '{metric}': {direction}")  # if not greater or less
 
+    # Print results
     print('P-values:')
     print(p_values)
     print('Effect sizes:')
@@ -626,121 +783,124 @@ def permutation_test_metrics(data1, data2, observed_metrics, sign=None, n_permut
 
     return p_values, effect_sizes
 
-def permutation_test_SWP(data1, data2, distances, observed_metrics, sign=None, n_permutations=1000, test_directions=None):
+def permutation_test_SWP(data1, data2, data_cols, distances, observed_metrics, sign=None, n_permutations=1000, test_directions=None):
     """
-    Perform a permutation test by randomizing group labels and computing SWP differences.
+    Performs a permutation test of SWP by randomizing group labels and computing SWP differences.
 
     Parameters:
-    - data1, data2: Pandas DataFrames containing observations for each group. Must have a 'Group' column.
-    - n_permutations: Number of permutations to perform.
+    - data1 (DataFrame): Wide-form raw data for the control group. Must have a 'Group' column.
+    - data2 (DataFrame): Wide-form raw data for the experimental group. Must have a 'Group' column.
+    - data_cols (slice): Indexes of columns in data that contain brain data.
+    - observed_metrics (DataFrame): Wide-form network metrics for both groups, where control group is row 0 and experimental group is row 1.
+    - sign (str): Whether to form graphs with positive weights ('Positive'), negative weights ('Negative'), or both (None).
+    - n_permutations (int): Number of permutations to perform to construct the null distribution.
+    - test_directions (dict): Directions for one-sided tests. Direction refers to control group.
 
     Returns:
     - A DataFrame with metric differences for each iteration.
     """
-    # Compute observed metrics
-    observed_diffs = observed_metrics.iloc[0, :] - observed_metrics.iloc[1, :]  # Difference: Group1 - Group2
-    print('Observed differences:')
-    print(observed_diffs.to_frame().T) # print the observed difference
 
-    # Store permutation results
-    null_diffs = pd.DataFrame(columns=observed_diffs.index, index=range(n_permutations))
-    combined_data = pd.concat([data1, data2])
-    group_labels = combined_data["Group"].unique()
-    group1_label, group2_label = group_labels
+    # Get the observed group differences
+    observed_diffs = observed_metrics.iloc[0, :] - observed_metrics.iloc[1, :]  # group 1 - group 2
+    print('Observed differences:')  # print title
+    print(observed_diffs.to_frame().T)  # print the observed difference
 
-    for i in range(n_permutations):
-        # Shuffle group labels
-        permuted_data = combined_data.copy()
-        permuted_data["Group"] = np.random.permutation(permuted_data["Group"])
+    # Run permutations
+    null_diffs = pd.DataFrame(columns=observed_diffs.index, index=range(n_permutations))  # to store null differences
+    combined_data = pd.concat([data1, data2])  # combine data into one DataFrame
+    group_labels = combined_data["Group"].unique()  # get group names
+    group1_label, group2_label = group_labels  # get individual group names
+
+    for i in range(n_permutations):  # for each permutation
+        permuted_data = combined_data.copy()  # copy the data
+        permuted_data["Group"] = np.random.permutation(permuted_data["Group"])  # shuffle the group labels
 
         # Split data into groups
-        permuted_data1 = permuted_data[permuted_data['Group'] == group1_label]
-        permuted_data2 = permuted_data[permuted_data['Group'] == group2_label]
+        permuted_data1 = permuted_data[permuted_data['Group'] == group1_label]  # group 1
+        permuted_data2 = permuted_data[permuted_data['Group'] == group2_label]  # group 2
 
-        # Generate graphs from permuted data
-        # For positive or negative graphs, split by sign then take the first or second graph for each group
-        if sign == 'Positive':
+        # Generate correlation matrices, distances and graphs from permuted data
+        if sign == 'Positive':  # if positive-only graphs
             # Generate positive pcormats
-            pcormat1 = partial_cor(permuted_data1.iloc[:, 7:], absolute=False).clip(lower = 0)
-            pcormat2 = partial_cor(permuted_data2.iloc[:, 7:], absolute=False).clip(lower = 0)
+            pcormat1 = partial_cor(permuted_data1.iloc[:, data_cols], absolute=False).clip(lower = 0)
+            pcormat2 = partial_cor(permuted_data2.iloc[:, data_cols], absolute=False).clip(lower = 0)
             # Get weight-distance combinations
             dists1 = weight_by_dist(pcormat1, distances, plot=False)
             dists2 = weight_by_dist(pcormat2, distances, plot=False)
             # Generate graphs
-            graphs = data_to_graphs(permuted_data, groupname=group2_label, split_sign=True)
+            graphs = data_to_graphs(permuted_data, data_cols=data_cols, groupname=group2_label, split_sign=True)
             graphs_perm = [graphs[0][0], graphs[1][0]] # select positive graphs
-        elif sign == 'Negative':
+        elif sign == 'Negative':  # if negative-only graphs
             # Generate negative pcormats
-            pcormat1 = abs(partial_cor(permuted_data1.iloc[:, 7:], absolute=False).clip(upper = 0))
-            pcormat2 = abs(partial_cor(permuted_data2.iloc[:, 7:], absolute=False).clip(upper = 0))
+            pcormat1 = abs(partial_cor(permuted_data1.iloc[:, data_cols], absolute=False).clip(upper = 0))
+            pcormat2 = abs(partial_cor(permuted_data2.iloc[:, data_cols], absolute=False).clip(upper = 0))
             # Get weight-distance combinations
             dists1 = weight_by_dist(pcormat1, distances, plot=False)
             dists2 = weight_by_dist(pcormat2, distances, plot=False)
             # Generate graphs
-            graphs = data_to_graphs(permuted_data, groupname=group2_label, split_sign=True)
+            graphs = data_to_graphs(permuted_data, data_cols = data_cols, groupname=group2_label, split_sign=True)
             graphs_perm = [graphs[0][1], graphs[1][1]]
-        # For absolute weights, don't split
-        elif sign is None:
+        elif sign is None:  # if using absolute weights
             # Generate absolute pcormats
-            pcormat1 = partial_cor(permuted_data1.iloc[:, 7:])
-            pcormat2 = partial_cor(permuted_data2.iloc[:, 7:])
+            pcormat1 = partial_cor(permuted_data1.iloc[:, data_cols])
+            pcormat2 = partial_cor(permuted_data2.iloc[:, data_cols])
             # Get weight-distance combinations
             dists1 = weight_by_dist(pcormat1, distances, plot=False)
             dists2 = weight_by_dist(pcormat2, distances, plot=False)
             # Generate graphs
-            graphs_perm = data_to_graphs(permuted_data, groupname=group2_label)
+            graphs_perm = data_to_graphs(permuted_data, data_cols=data_cols, groupname=group2_label)
 
-        # Get C_obs and L_obs for each permuted graph
+        # Get clustering and path length for each permuted graph
         permuted_metrics = []  # initialise metric list
         for graph in graphs_perm:  # for each graph and group
             metrics = measure_net(graph)  # get the network metrics
             permuted_metrics.append(metrics)  # add net metrics to list
-
-        permuted_metrics = pd.concat(permuted_metrics,ignore_index=True)
-        C_obs = permuted_metrics['clustering']
-        L_obs = permuted_metrics['L_obs']
+        permuted_metrics = pd.concat(permuted_metrics, ignore_index=True)  # put metrics into DataFrame
+        C_obs = permuted_metrics['clustering']  # get clustering
+        L_obs = permuted_metrics['L_obs']  # get path length
 
         # Calculate SWP and delta for each permuted dataset
         SWP1 = SWP(pcormat1, dists1, C_obs[0], L_obs[0], report=False)
         SWP2 = SWP(pcormat2, dists2, C_obs[1], L_obs[1], report=False)
 
+        # Get the differences and store
         permuted_diffs = SWP1 - SWP2
-
-        # Store null differences
         null_diffs.iloc[i, :] = permuted_diffs.values
 
+    # Print average null differences
     print('Mean null differences:')
-    print(null_diffs.mean())
+    print(null_diffs.mean().to_frame().T)
 
-    # One-tailed P-values
-    p_values = pd.DataFrame(columns=observed_diffs.index, index=range(1)) # Store P-values
-    effect_sizes = pd.DataFrame(columns=observed_diffs.index, index=range(1))  # Store Cohen's d
-    for metric in observed_diffs.index:
-        direction = test_directions.get(metric, "greater")  # Default to greater if not specified
-        null_distribution = null_diffs[metric].dropna()  # Drop NaNs if any
+    # One-tailed P-tests
+    p_values = pd.DataFrame(columns=observed_diffs.index, index=range(1))  # to store P-values
+    effect_sizes = pd.DataFrame(columns=observed_diffs.index, index=range(1))  # to store Cohen's d
+    for metric in observed_diffs.index:  # for each metric
+        direction = test_directions.get(metric, "greater")  # set test direction to greater if not specified
+        null_distribution = null_diffs[metric].dropna()  # drop NaNs if any
 
-        # Compute effect sizes
-        null_mean = null_distribution.mean()
-        null_std = null_distribution.std()
+        # Calculate effect sizes
+        null_mean = null_distribution.mean()  # get means of null differences
+        null_std = null_distribution.std()  # get standard deviations of null differences
+        cohen_d = (observed_diffs[metric] - null_mean) / null_std if null_std > 0 else np.nan  # Cohen's d
+        effect_sizes[metric] = cohen_d  # add to effect sizes
 
-        cohen_d = (observed_diffs[metric] - null_mean) / null_std if null_std > 0 else np.nan
-        effect_sizes[metric] = cohen_d
-
-        if direction == "greater":
+        # Calculate P-values
+        if direction == "greater":  # if direction of control group is greater
             # quantile method:
             # threshold = np.percentile(null_diffs[metric], 95)
             # p_values[metric] = np.mean(observed_diff[metric] > threshold)
             # proportional method:
-            p_values[metric] = (null_diffs[metric] >= observed_diffs[metric]).mean()
-        elif direction == "less":
+            p_values[metric] = (null_diffs[metric] >= observed_diffs[metric]).mean()  # P = null diffs > observed diffs
+        elif direction == "less":  # if direction of control group is lesser
             # quantile method:
             # threshold = np.percentile(null_diffs[metric], 5)
             # p_values[metric] = np.mean(observed_diff[metric] < threshold)
             # proportional method:
-            p_values[metric] = (null_diffs[metric] <= observed_diffs[metric]).mean()
+            p_values[metric] = (null_diffs[metric] <= observed_diffs[metric]).mean()  # P = null diffs < observed diffs
         else:
             raise ValueError(f"Invalid test direction for metric '{metric}': {direction}")
 
+    # Print results
     print('P-values:')
     print(p_values)
     print('Effect sizes:')
