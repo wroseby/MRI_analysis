@@ -42,9 +42,10 @@ def partial_cor(data, absolute = True):
     if absolute:  # if requiring absolute partial correlations
         data_pcorr = abs(data_pcorr)  # get absolute values
 
-    return (data_pcorr)
+    return data_pcorr
 
-def data_to_graphs(data, data_cols, groupname = False, log = False, split_sign = False, absolute = True):
+
+def data_to_graphs(data, data_cols, groupname=False, log=False, split_sign=False, absolute=True):
     """
     Converts data or data file into a graph-tool graph.
 
@@ -133,7 +134,7 @@ def plot_strengths(graphs):
     plt.title("Node Strength Distributions")  # set the title
     plt.show()  # show plot
 
-def measure_net(graph):
+def measure_net(graph, normalise=False, randomise=False, seed=91939):
     """
     Calculates basic network metrics for a graph.
 
@@ -146,24 +147,74 @@ def measure_net(graph):
 
     net_metrics = pd.DataFrame()  # initialise dataframe to store results
 
-    clustering = global_clustering(graph, weight=graph.ep.weight)[0]  # calculate global weighted clustering
-    weight_inv = graph.new_edge_property("double")  # create new edge property for inverted weights
-    for e in graph.edges():  # for all the graph edges
-        weight_inv[e] = 1.0 / graph.ep.weight[e]  # get inverted weights
-    graph.ep['weight_inv'] = weight_inv  # set inverted weights as graph edge property
-    total_efficiency = 0.0  # initialise total efficiency for graph
-    count = 0  # initialise a count
-    distances = shortest_distance(graph, weights=graph.ep.weight_inv)  # shortest distances between vertices
-    distances_sum = 0  # initialise the sum of distances
-    for j in range(graph.num_vertices()):  # for all vertices
-        for k in range(j + 1, graph.num_vertices()):  # to all other vertices
-            if distances[j][k] != 0:  # if shortest distance is not 0
-                total_efficiency += 1.0 / distances[j][k]  # add inverse of shortest distance to total efficiency
-                count += 1  # and add one count
-                distances_sum += distances[j][k]  # add shortest distance to sum
-    L_obs = distances_sum / ((graph.num_vertices() - 1) * graph.num_vertices())  # characteristic (observed) path length
-    global_efficiency = total_efficiency / count  # global efficiency of graph is mean of efficiency
-    vb, eb = betweenness(graph, weight=graph.ep.weight_inv)  # calculate edge and vertex betweenness
+    if normalise:  # if normalising weights
+        norm_indices = np.where((graph.ep.weight.a != 1) & (graph.ep.weight.a != 0))[0]  # get off-diagonal indexes
+        non_diag = graph.ep.weight.a[norm_indices]  # get the off-diagonal values
+        weight_norm = ((non_diag - min(non_diag)) / (max(non_diag) - min(non_diag))) + 0.001  # normalise
+        graph.ep.weight.a[norm_indices] = weight_norm  # replace weights with normalised weights
+
+    if randomise:  # if randomising weights
+        for i in range(10):
+            shuffle_indices = np.where(graph.ep.weight.a != 1)[0]  # get off-diagonal indexes
+            non_diag = graph.ep.weight.a[shuffle_indices]  # get the off-diagonal values
+            np.random.seed(seed)  # set seed for consistency
+            np.random.shuffle(non_diag)  # randomly shuffle
+            graph.ep.weight.a[shuffle_indices] = non_diag  # replace
+
+            # initialise lists for randomised graph metrics
+            clusterings = []
+            L_obss = []
+            efficiencies = []
+            vbs = []
+            ebs = []
+
+            clusterings.append(global_clustering(graph, weight=graph.ep.weight)[0])  # calculate global weighted clustering
+            weight_inv = graph.new_edge_property("double")  # create new edge property for inverted weights
+            for e in graph.edges():  # for all the graph edges
+                weight_inv[e] = 1.0 / graph.ep.weight[e]  # get inverted weights
+            graph.ep['weight_inv'] = weight_inv  # set inverted weights as graph edge property
+            total_efficiency = 0.0  # initialise total efficiency for graph
+            count = 0  # initialise a count
+            distances = shortest_distance(graph, weights=graph.ep.weight_inv)  # shortest distances between vertices
+            distances_sum = 0  # initialise the sum of distances
+            for j in range(graph.num_vertices()):  # for all vertices
+                for k in range(j + 1, graph.num_vertices()):  # to all other vertices
+                    if distances[j][k] != 0:  # if shortest distance is not 0
+                        total_efficiency += 1.0 / distances[j][
+                            k]  # add inverse of shortest distance to total efficiency
+                        count += 1  # and add one count
+                        distances_sum += distances[j][k]  # add shortest distance to sum
+            L_obss.append(distances_sum / (
+                        (graph.num_vertices() - 1) * graph.num_vertices()))  # characteristic (observed) path length
+            efficiencies.append(total_efficiency / count)  # global efficiency of graph is mean of efficiency
+            vbs.append(betweenness(graph, weight=graph.ep.weight_inv)[0])
+            ebs.append(betweenness(graph, weight=graph.ep.weight_inv)[1])
+
+        clustering = np.mean(clusterings)
+        L_obs = np.mean(L_obss)
+        global_efficiency = np.mean(efficiencies)
+        vb = np.mean(vbs)
+        eb = np.mean(ebs)
+
+    else:
+        clustering = global_clustering(graph, weight=graph.ep.weight)[0]  # calculate global weighted clustering
+        weight_inv = graph.new_edge_property("double")  # create new edge property for inverted weights
+        for e in graph.edges():  # for all the graph edges
+            weight_inv[e] = 1.0 / graph.ep.weight[e]  # get inverted weights
+        graph.ep['weight_inv'] = weight_inv  # set inverted weights as graph edge property
+        total_efficiency = 0.0  # initialise total efficiency for graph
+        count = 0  # initialise a count
+        distances = shortest_distance(graph, weights=graph.ep.weight_inv)  # shortest distances between vertices
+        distances_sum = 0  # initialise the sum of distances
+        for j in range(graph.num_vertices()):  # for all vertices
+            for k in range(j + 1, graph.num_vertices()):  # to all other vertices
+                if distances[j][k] != 0:  # if shortest distance is not 0
+                    total_efficiency += 1.0 / distances[j][k]  # add inverse of shortest distance to total efficiency
+                    count += 1  # and add one count
+                    distances_sum += distances[j][k]  # add shortest distance to sum
+        L_obs = distances_sum / ((graph.num_vertices() - 1) * graph.num_vertices())  # characteristic (observed) path length
+        global_efficiency = total_efficiency / count  # global efficiency of graph is mean of efficiency
+        vb, eb = betweenness(graph, weight=graph.ep.weight_inv)  # calculate edge and vertex betweenness
 
     # store results in DataFrame
     net_metrics['clustering'] = [clustering]
@@ -354,10 +405,7 @@ def permutation_test_dist(dists1, dists2, groupname, test_direction, n_permutati
     return p_value, effect_size
 
 
-
-
-
-def weight_by_dist(cormat, dists, plot = True):
+def weight_by_dist(cormat, dists, plot=True):
     """
     Combines graph edge weights with their physical distances.
 
@@ -371,35 +419,43 @@ def weight_by_dist(cormat, dists, plot = True):
     - plt: Scatterplot of edge weights as a function of distance.
     """
 
-    # Convert the correlation matrix into long form for merging with weights
+    # Prepare correlation matrix for merging
     flatmat = cormat.reset_index().melt(id_vars='index',
-                                        var_name='area_1',
-                                        value_name='weight')
+                                                 var_name='area_2',
+                                                 value_name='weight')
+    flatmat = flatmat.rename(columns={'index': 'area_1'})  # rename index to area_1
+    flatmat['area_1'] = flatmat['area_1'].astype(int)  # ensure area names are integers
+    flatmat['area_2'] = flatmat['area_2'].astype(int)  # ensure area names are integers
+    flatmat['area_pair'] = flatmat.apply(lambda row: tuple(sorted([row['area_1'], row['area_2']])), axis=1)  # create unique pair combinations by ordering
+    flatmat = flatmat.drop_duplicates(subset='area_pair').reset_index(drop=True)  # drop duplicate pairs
+    flatmat = flatmat[flatmat['area_1'] != flatmat['area_2']]  # drop self-loops
+    flatmat.drop(columns=['area_1', 'area_2'], inplace=True)  # drop area columns
 
-    dists['area_1'] = dists['area_1'].astype(str)  # ensure area names are strings
-    dists['area_2'] = dists['area_2'].astype(str)  # ensure area names are strings
+    # Prepare distances for merging
+    dists['area_1'] = dists['area_1'].astype(int)  # ensure area names are integers
+    dists['area_2'] = dists['area_2'].astype(int)  # ensure area names are integers
+    dists['area_pair'] = dists.apply(lambda row: tuple(sorted([row['area_1'], row['area_2']])), axis=1)  # create unique pair combinations by ordering
+    dists = dists.drop_duplicates(subset='area_pair').reset_index(drop=True)  # drop duplicate pairs
+    dists = dists[dists['area_1'] != dists['area_2']]  # drop self-loops
+    dists.drop(columns=['area_1', 'area_2'], inplace=True)  # drop area columns
 
     # Merge weights with distances
-    graph_dist = pd.merge(flatmat, dists, left_on=['index', 'area_1'],
-                          right_on=['area_2', 'area_1'],
-                          how='left')
-
-    # Re-create the area pair column by re-ordering the areas
-    graph_dist['pair'] = graph_dist.apply(lambda row: tuple(sorted([row['index'], row['area_1']])), axis=1)
-    graph_dist = graph_dist[graph_dist['index'] != graph_dist['area_1']]  # drop self-loops
-    edge_dist = graph_dist.drop_duplicates(subset='pair').reset_index(drop=True)  # drop repeated pairs
+    graph_dist = pd.merge(flatmat, dists, on=['area_pair'], how='inner')  # merge by the unique area pairs
+    graph_dist['area_1'] = graph_dist['area_pair'].str[0]  # re-acquire area_1
+    graph_dist['area_2'] = graph_dist['area_pair'].str[1]  # re-acquire area_2
+    graph_dist['area_pair'] = graph_dist['area_pair'].apply(lambda x: f"{int(x[0])}-{int(x[1])}")  # convert back to string with dash
 
     if plot:  # if a plot of weight-distance combinations is desired
         fig, axs = plt.subplots(1, 1, figsize=(8, 8))  # initialise plot
-        axs.scatter(edge_dist['distance'], edge_dist['weight'],  # plot of weight over distance
-                    alpha=0.8, s=1.5, c=edge_dist['weight'])  # set transparency and colour
+        axs.scatter(graph_dist['distance'], graph_dist['weight'],  # plot of weight over distance
+                    alpha=0.8, s=1.5, c=graph_dist['weight'])  # set transparency and colour
         axs.set_xlabel('Distance')  # set x-axis label
         axs.set_ylabel('pcor')  # set y-axis label
 
     return graph_dist
 
 
-def SWP(cormat, dists, C_obs, L_obs,report = True):
+def SWP(cormat, dists, C_obs, L_obs, report=True):
     """
     Calculates small-world propensity (SWP) and delta of a graph.
     Uses a distance-based lattice and a single random rewire as null models, preserving edge weight distribution.
@@ -434,7 +490,7 @@ def SWP(cormat, dists, C_obs, L_obs,report = True):
     # Generate lattice graph null model
     distances_sort = dists.sort_values(by=['distance'], ascending=[True])  # sort distances from shortest to largest
     distances_sort = distances_sort[['area_1', 'area_2', 'distance']].reset_index(drop=True)  # get relevant columns
-    lattice_weights = dists['weight'].sort_values(ascending = False).reset_index(drop=True)  # get sorted weights
+    lattice_weights = dists['weight'].sort_values(ascending=False).reset_index(drop=True)  # get sorted weights
     distances_sort['weight'] = lattice_weights  # combine sorted distances and sorted weights
 
     areas = pd.unique(dists[['area_1', 'area_2']].values.ravel('K'))  # get unique area names
@@ -448,25 +504,32 @@ def SWP(cormat, dists, C_obs, L_obs,report = True):
     remove_self_loops(graph_latt)  # remove self-loops
 
     # Generate random graph null model
+    C_rands = []  # initialise random clustering coefficients
+    L_rands = []  # initialise random path lengths
+
     non_diag = [cormat.iloc[j, k]  # take entries from the correlation matrix
                 for j in range(cormat.shape[0])  # from rows
                 for k in range(cormat.shape[1])  # and from columns
                 if j != k]  # but not the diagonal
-    np.random.shuffle(non_diag)  # randomly shuffle the weights in place
-    cormat_rand = cormat.copy()  # copy the structure of the input matrix
-    v = 0  # set a counter for vertices
-    for j in range(cormat.shape[0]):  # for all rows
-        for k in range(cormat.shape[1]):  # to all columns
-            if j != k:  # if not diagonal entry
-                cormat_rand.iloc[j, k] = non_diag[v]  # then populate with shuffled weights
-                v += 1  # add one to counter
-    graph_rand = Graph(scipy.sparse.lil_matrix(cormat_rand), directed=False)  # create random graph
+
+    for i in range(10):  # multiple randomisations
+        np.random.shuffle(non_diag)  # randomly shuffle the weights in place
+        cormat_rand = cormat.copy()  # copy the structure of the input matrix
+        v = 0  # set a counter for vertices
+        for j in range(cormat.shape[0]):  # for all rows
+            for k in range(cormat.shape[1]):  # to all columns
+                if j != k:  # if not diagonal entry
+                    cormat_rand.iloc[j, k] = non_diag[v]  # then populate with shuffled weights
+                    v += 1  # add one to counter
+        graph_rand = Graph(scipy.sparse.lil_matrix(cormat_rand), directed=False)  # create random graph
+        C_rands.append(global_clustering(graph_rand, weight=graph_rand.ep.weight)[0])  # add clustering to list
+        L_rands.append(calculate_path_length(graph_rand))  # add path length to list
 
     # Get network metrics of null models
     C_latt = global_clustering(graph_latt, weight = graph_latt.ep.weight)[0]  # global clustering, lattice graph
-    C_rand = global_clustering(graph_rand, weight = graph_rand.ep.weight)[0]  # global clustering, random graph
+    C_rand = np.mean(C_rands)  # global clustering, random graph
     L_latt = calculate_path_length(graph_latt)  # path length, lattice graph
-    L_rand = calculate_path_length(graph_rand)  # path length, random graph
+    L_rand = np.mean(L_rands)  # path length, random graph
 
     if report: # if we want outputs for sanity checking; these should be similar to observed metrics
         print('C_latt, C_rand, L_latt, L_rand')  # print metric names
@@ -683,7 +746,7 @@ def draw_graph_difference(graphs, positions, absolute_edges, output_file):
         output=output_file  # where to save the figure
     )
     
-def permutation_test_metrics(data1, data2, data_cols, observed_metrics, sign=None, n_permutations=1000, test_directions=None):
+def permutation_test_metrics(data1, data2, data_cols, observed_metrics, sign=None, n_permutations=1000, test_directions=None, normalise=False, randomise=False):
     """
     Performs a permutation test of network metrics by randomizing group labels and computing metric differences.
 
@@ -695,6 +758,8 @@ def permutation_test_metrics(data1, data2, data_cols, observed_metrics, sign=Non
     - sign (str): Whether to form graphs with positive weights ('Positive'), negative weights ('Negative'), or both (None).
     - n_permutations (int): Number of permutations to perform to construct the null distribution.
     - test_directions (dict): Directions for one-sided tests. Direction refers to control group.
+    - normalise (bool): If True, use normalised edge weights for metric calculation.
+    - randomise (bool): If True, use randomised edge weights for metric calculation.
 
     Returns:
     - A DataFrame with metric differences for each iteration.
@@ -728,10 +793,10 @@ def permutation_test_metrics(data1, data2, data_cols, observed_metrics, sign=Non
         # Compute metrics for permuted groups
         permuted_metrics = []  # initialise metric list
         for graph in graphs_perm:  # for each graph and group
-            metrics = measure_net(graph)  # get the network metrics
+            metrics = measure_net(graph, normalise=normalise, randomise=randomise)  # get the network metrics
             permuted_metrics.append(metrics)  # add net metrics to list
 
-        permuted_metrics = pd.concat(permuted_metrics,ignore_index=True)  # put null metrics into DataFrame
+        permuted_metrics = pd.concat(permuted_metrics, ignore_index=True)  # put null metrics into DataFrame
         permuted_diffs = permuted_metrics.iloc[0, :] - permuted_metrics.iloc[1, :]  # calculate the difference
         null_diffs.iloc[i, :] = permuted_diffs.values  # store the null difference
 

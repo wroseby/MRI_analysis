@@ -31,8 +31,10 @@ library(gridExtra)
 library(copula)
 library(effsize)
 library(MASS)
+library(mgcv)
 library(MVN)
 library(effectsize)
+library(gratia)
 ```
 
 ```{r load_data, include=F}
@@ -177,10 +179,13 @@ To see how these clusters are structured, we will now re-generate this clusterin
 
 # Re-run clustering with suggested clusters
 hc = hclust.plot(data_lr, group = 'Control', clust_method = 'ward.D', 
-                        cut = cut, clustn = clustn, plot_tree = T)
+                        cut = cut, clustn = clustn, plot_tree = T)[[1]]
+
+# Re-order clustering to match original
+hc = hc[match(colnames(data_lr[, -metadata_cols]), hc$Area), ]
 
 # Plot cluster anatomical positions
-hc = merge(parcel_positions, hc[[1]]) # merge with 2D coordinates
+hc = merge(parcel_positions, hc) # merge with 2D coordinates
 hc$cluster = factor(hc$cluster)
 ggplot(data = hc, aes(x = x, y = max(y) - y, fill = cluster))+
   geom_point(size = 0.8, shape = 21, stroke = 0.5)+
@@ -193,7 +198,7 @@ ggplot(data = hc, aes(x = x, y = max(y) - y, fill = cluster))+
         axis.text = element_blank())
 
 # Write clustering arrangement to .csv
-write.csv(hc, file = paste0(savepath_data, 'hclust/hc.csv'))
+write.csv(hc, file = paste0(savepath_data, 'hclust/hc.csv'), row.names = F)
 ```
 
 The clusters seem to form according to anatomical location, with proximal parcels falling into the same cluster. The number of parcels in a cluster varies from about 1 to 6. This indicates the clustering is uncovering some anatomical structure in the data, with proximal parcels having more similar correlations with the rest of the cortex.
@@ -413,6 +418,12 @@ data_matched_comp = pcor_comp(data_list = data_matched_hc, nclust = nclust,
 print(data_matched_comp[[1]])  # display plots
 print(data_matched_comp[[2]][[1]][[1]])  # display distribution tests
 pcor_diffs = data_matched_comp[[2]][[1]][[2]]  # get pairwise pcor differences
+sort_pair = function(x) {  # function to sort area pairs
+  parts = as.numeric(unlist(strsplit(x, "-")))
+  paste0(sort(parts), collapse = "-")
+}
+pcor_diffs$area_pair = sapply(pcor_diffs$area_pair, sort_pair)  # sort
+pcor_diffs = pcor_diffs[!duplicated(pcor_diffs$area_pair),]  # remove duplicares
 print(table(pcor_diffs$signif) / nrow(pcor_diffs))  # percentage different
 
 # Set filenames for saving matched data --- change if needed
@@ -521,7 +532,16 @@ ggplot(data = net_metrics, aes(x = Group, y = value, fill = Group))+
 
 We observe some fairly clear group differences in clustering coefficient, efficiency and path length, although only path length technically has a P < 0.05. No differences are seen for average betweenness. 
 
-## TESTING METRICS WITH NORMALISED WEIGHTS / WEIGHT-PRESERVING RANDOM MODELS - DOES TOPOLOGY MATTER? ##
+However, we know from the partial correlation distributions that synaesthetes have larger correlations, corresponding to larger edge weights in their network. This could be trivially driving differences in clustering, efficiency and path length, since the weighted versions of these calculations produce larger values when weights are greater. If this is true, the group differences in these values would not reflect the network topology, but rather just the presence of stronger correlations within the synaesthete group. One method to probe this possibility is to normalise the weights of both networks before metric calculation, so that there are no differences on average. Group differences here would point to the importance of network topology. Another method is to randomise the edge weights and recompute the metrics. Group differences here would suggest that specific differences in topology are not the driving factor for metric disparities. In python, we have followed both of these approaches, making sure to average over multiple random networks to account for different random topologies. We will import and visualise the results here.
+
+```{r}
+# Import and visualise normalised and randomised network metrics #
+
+
+
+
+```
+
 
 
 ## Cluster number perturbation
@@ -686,7 +706,6 @@ dists$Group = factor(dists$Group, levels = c('Control', exp_group))
 
 # Plot empirical weight vs distance with smooth curves
 ggplot(data = dists, aes(x = distance, y = weight, colour = Group))+
-  geom_point(shape = 21, alpha = 0.15)+
   geom_smooth(lwd = 1.1)+
   scale_color_manual(values = c('blue', 'red'))+
   labs(x = 'Two-dimensional distance (pixels)',
@@ -699,45 +718,63 @@ ggplot(data = dists, aes(x = distance, y = weight, colour = Group))+
     axis.line = element_line(linewidth = 0.8, colour = 'black'),
     axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
     axis.ticks.length = unit(1, 'mm'),
-    legend.position = 'none',
+    legend.position = 'top',
     plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0))
   )
 
 # Fit a generalized additive model to compare groups
-gam_model = gam(weight ~ s(distance, by = Group, k = 7) + Group, data = dists,
+gam_model = gam(weight ~ s(distance, by = Group, k = 5) + Group, data = dists,
              family = 'gaussian')
 print(summary(gam_model))  # for signifiance of model terms
-gam_model_no_int = gam(weight ~ s(distance, k = 7) + Group, data = dists, 
+gam_model_no_int = gam(weight ~ s(distance, k = 5) + Group, data = dists, 
                        family = 'gaussian')  # without group separation
-print(anova.gam(gam_model, gam_model_no_int, 
-          test = 'Chisq'))  # for testing the group separation
+dev_test = anova.gam(gam_model, gam_model_no_int, 
+          test = 'Chisq')
+print(dev_test)
 
 # Predict weight-distance relationship from fitted GAM
-distance_grid = seq(min(dists$distance), max(dists$distance), length.out = 500)
-dist_tem_cntrl = data.frame(distance = distance_grid, 
-                            Group = factor("Control", 
-                                           levels = levels(dists$Group)))
-dist_tem_exp = data.frame(distance = distance_grid, 
-                               Group = factor(exp_group, 
-                                              levels = levels(dists$Group)))
-weight_pred_cntrl = predict(gam_model, 
-                            newdata = dist_tem_cntrl, type = "response")
-weight_pred_exp = predict(gam_model, 
-                            newdata = dist_tem_exp, type = "response")
-GAM_preds = data.frame(
-  distance = rep(distance_grid, 2),
-  weight = c(y_pred_control, y_pred_treatment),
-  Group = rep(c("Control", "Treatment"), each = length(distance_grid))
+distance_grid = seq(min(dists$distance), 
+                    max(dists$distance), 
+                    length.out = 100)
+GAM_data = expand.grid(
+  distance = seq(min(dists$distance), max(dists$distance), length.out = 100),
+  Group = c('Control', exp_group)
 )
+weight_pred = predict(gam_model, newdata = GAM_data, se.fit = TRUE)
+GAM_data$weight = weight_pred$fit
+GAM_data$se = weight_pred$se.fit
+
+GAM_control = GAM_data[GAM_data$Group == 'Control',]
+GAM_exp = GAM_data[GAM_data$Group == exp_group,]
+GAM_CIs = data.frame(distance =
+                       unique(GAM_data$distance),
+                     diff = 
+                       GAM_control$weight - GAM_exp$weight,
+                     se_diff = 
+                       sqrt(GAM_control$se^2 + GAM_exp$se^2)
+                     )
+GAM_CIs$CI_upper = GAM_CIs$diff + 1.96 * GAM_CIs$se_diff
+GAM_CIs$CI_lower = GAM_CIs$diff - 1.96 * GAM_CIs$se_diff
+GAM_CIs$effect_size = GAM_CIs$diff / 
+  sqrt((GAM_control$se^2 + GAM_exp$se^2) / 2)
+
+GAM_CIs$p_value = with(GAM_CIs, 2 * pnorm(-abs(diff / se_diff)))
+GAM_CIs$signif = GAM_CIs$p_value < .05
 
 # Plot predicted curves
-ggplot(GAM_preds, aes(x = distance, y = weight, color = Group)) +
+ggplot(GAM_data, aes(x = distance, y = weight, color = Group)) +
+  geom_ribbon(aes(ymin = weight-se, ymax = weight+se, group = Group),
+              fill = 'grey', colour = NA)+
   geom_line(size = 1.2) +
+  annotate('text', x = 210, y = 0.28, 
+           label = substitute(P[smooth] == pval, 
+                              list(pval = round(dev_test[2,5], 3))),
+         size = 5, hjust = 'left')+
   
   scale_color_manual(values = c("blue", "red"))+
   
   labs(title = "Predicted GAM curves", 
-       x = 'Two-dimensional distance (pixels)',
+       x = 'Geodesic distance on the spherical cortical surface',
        y = "Predicted partial correlation") +
   theme_classic()+
   theme(
@@ -746,40 +783,13 @@ ggplot(GAM_preds, aes(x = distance, y = weight, color = Group)) +
     axis.line = element_line(linewidth = 0.8, colour = 'black'),
     axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
     axis.ticks.length = unit(1, 'mm'),
-    legend.position = 'none',
+    legend.position = 'top',
     plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0))
   )
 
-# Plot predicted difference curve
-GAM_diffs = data.frame(
-  distance = distance_grid,
-  difference = weight_pred_cntrl - weight_pred_exp
-)
-ggplot(GAM_diffs, aes(x = distance, y = difference)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
-  geom_line(color = "darkgreen", size = 1.2) +
-  
-  labs(title = "Group difference in GAM curves", 
-     x = 'Two-dimensional distance (pixels)',
-     y = "Control - Treatment")+
-  theme_classic()+
-  theme(
-    text = element_text(size = 12, face = 'bold', colour = 'black'),
-    axis.text = element_text(size = 10, colour = 'black'),,
-    axis.line = element_line(linewidth = 0.8, colour = 'black'),
-    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
-    axis.ticks.length = unit(1, 'mm'),
-    legend.position = 'none',
-    plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0))
-  )
-
-
-# Get numerical curve differences
-mean_difference = mean(GAM_diffs$difference)
-max_difference = max(abs(GAM_diffs$difference))
-
-cat("Mean difference across distance:", mean_difference, "\n")
-cat("Maximum absolute difference:", max_difference, "\n")
+# Plot derivatives - how is weight changing
+gam_deriv = derivatives(gam_model, term = "s(distance)", partial_match = T)
+draw(deriv)
 ```
 
 Examination of the distance-weight relationships shows that both controls and synaesthetes have the strongest weights at short distances, and this rapidly drops off as distances increases. However, while this continues to decline in controls, in synaesthetes the weights increase again at the longest distances. Examining the fit of a GAM, we see that both the parametric effect of group as well as the smoothing terms are statistically significant, suggesting that 1) synaesthetes have significantly different weights to controls and 2) that incorporating smoothing terms significantly improves model fit, supporting a non-linear relationship between distance and weight. In comparing a GAM with separate group smoothing terms to one with just one smooth term (but still a parametric group effect), we observe a statistically significant difference via analysis of deviance, suggesting that the two groups have different distance-weight relationships.
@@ -986,18 +996,42 @@ We will now compare the network metrics, as calculated in python.
 ```{r split_net_metrics, fig.cap = 'Network metrics of positive and negative networks', message = F}
 # Report positive and negative network metrics #
 
-# Set filename for split network metrics --- change if needed
-split_metrics_filename = 'hc_matched_split_net_metrics.csv' 
+# Set filenames for split network metrics --- change if needed
+net_metrics_split_filename = 'hc_matched_split_net_metrics.csv' 
+net_metrics_jk_split_filename = 'hc_matched_split_net_metrics.csv'
+net_metrics_split_perm_filename = 'hc_matched_split_net_perm.csv'
+
+# Read in data
 net_metrics = read.csv(paste0(savepath_data,
-                              'hclust/', split_metrics_filename))
+                              'hclust/', net_metrics_split_filename))
+net_metrics_jk = read.csv(paste0(savepath_data,
+                              'hclust/', net_metrics_split_jk_filename))
+net_metrics_perm = read.csv(paste0(savepath_data,
+                              'hclust/', net_metrics_split_perm_filename))
 
 net_metrics = melt(net_metrics, .id_vars = c('Group', 'Sign'))
 net_metrics$Sign = factor(net_metrics$Sign, levels = c('Positive', 'Negative'))
+
+
+# Create p-value positions
+net_lims = net_metrics %>%
+  group_by(Metric) %>%
+  summarise(y_max = max(value+SE, na.rm = TRUE))
+
+pvals = pvals %>%
+  left_join(net_lims, by = "Metric") %>%
+  mutate(y_pos = y_max * 1.1) 
 
 # Plot results
 ggplot(data = net_metrics, aes(x = Sign, y = value, fill = Group))+
   geom_col(position = position_dodge(),
            alpha = 0.5, color = 'black',  lwd = 0.8)+
+  geom_segment(data = pvals,
+               aes(x = 1, xend = 2, y = y_pos, yend = y_pos),
+               inherit.aes = FALSE, lwd = 0.8) +
+  geom_text(data = pvals,
+            aes(x = 1.5, y = y_pos * 1.1, label = value),
+            inherit.aes = FALSE)+
   
   scale_y_continuous(expand = expansion(add = c(0,0)))+
   scale_fill_manual(values = c('blue', 'red'))+
@@ -1029,35 +1063,173 @@ ggplot(data = net_metrics, aes(x = Sign, y = value, fill = Group))+
 
 Interestingly, clustering is lower in positive networks, where it is also the same between groups. Efficiency is greater in positive networks, but appears to be proportionally higher for synesthetes in the negative networks. The average partial correlation strength is greater in positive networks, which may be driven by a few particularly strong connections. 
 
-To examine the possible differences in weight-distance relationships between positive and negative networks, let's import the matched distances and weights from python and plot them:
+As for the absolute networks, we will also examine the weight-distance relationship in both groups. We will import distances from python, visualise them, and compare the curves using GAMs. We will do this first for the positive network. 
 
-```{r weight_distance_split}
-# Visualise weight-distance relationships for split networks #
+```{r weight_distance_split_pos}
+# Visualise weight-distance relationships for positivesplit networks #
 
 # Import and combine 2D distance data
-dists_cntrl_filename = 'hc_matched_cntrl_split_dists.csv'  # filename for control distances --- change if needed
-dists_exp_filename = 'hc_matched_syn_split_dists.csv'  # filename for experimental distances --- change if needed
+# filename for control distances --- change if needed
+dists_cntrl_filename = 'hc_matched_cntrl_split_dists.csv' 
+# filename for experimental distances --- change if needed
+dists_exp_filename = 'hc_matched_syn_split_dists.csv' 
 
 dists_cntrl = read.csv(paste0(savepath_data,
                               'hclust/', dists_cntrl_filename))
 dists_exp = read.csv(paste0(savepath_data,
                             'hclust/', dists_exp_filename))
-
-
 dists = rbind(dists_cntrl, dists_exp)
 dists$Group = rep(c('Control', exp_group), each = nrow(dists)/2)
 dists$Sign = factor(ifelse(dists$weight > 0, 'Positive', 'Negative'),
                     levels = c('Positive', 'Negative'))
+dists$Group = factor(dists$Group, levels = c('Control', exp_group))
 
-ggplot(data = dists, aes(x = distance, y = weight, colour = Group))+
+# Positive networks
+dists_pos = dists[dists$Sign == 'Positive',]
+
+# Plot all correlations over distance
+ggplot(data = dists_pos, aes(x = distance, y = weight, colour = Group))+
+  geom_point(alpha = 0.3)+
   geom_smooth(lwd = 1.1)+
   scale_color_manual(values = c('blue', 'red'))+
-  labs(x = 'Two-dimensional distance (pixels)', # change to mm at some point
-       y = 'Absolute partial correlation')+
-  facet_wrap(~Sign, scales = 'free_y')
+  labs(x = 'Geodesic distance on the spherical cortical surface',
+       y = 'Partial correlation',
+       title = 'Weight as a function of cortical distance; Positive')+
+  theme_classic()+
+  theme(
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 10, colour = 'black'),,
+    axis.line = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'top',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0))
+  )
+
+# Fit GAMs and compare - per-group smoothing and no per-group smoothing
+gam_model_pos = gam(weight ~ s(distance, by = Group, k = 5) + Group, 
+                    data = dists_pos, family = 'gaussian')
+print(summary(gam_model_pos))  # for signifiance of model terms
+gam_model_pos_no_int = gam(weight ~ s(distance, k = 5) + Group, 
+                       data = dists_pos, family = 'gaussian') 
+dev_test = anova.gam(gam_model_pos, gam_model_pos_no_int, 
+          test = 'Chisq')
+print(dev_test)
+
+# Predict weight-distance relationship from fitted GAM
+distance_grid = seq(min(dists_pos$distance), 
+                    max(dists_pos$distance), 
+                    length.out = 100)
+GAM_data = expand.grid(
+  distance = seq(min(dists_pos$distance), 
+                 max(dists_pos$distance), 
+                 length.out = 100),
+  Group = c('Control', exp_group)
+)
+weight_pred = predict(gam_model_pos, newdata = GAM_data, se.fit = TRUE)
+GAM_data$weight = weight_pred$fit
+GAM_data$se = weight_pred$se.fit
+
+GAM_control = GAM_data[GAM_data$Group == 'Control',]
+GAM_exp = GAM_data[GAM_data$Group == exp_group,]
+GAM_CIs = data.frame(distance =
+                       unique(GAM_data$distance),
+                     diff = 
+                       GAM_control$weight - GAM_exp$weight,
+                     se_diff = 
+                       sqrt(GAM_control$se^2 + GAM_exp$se^2))
+GAM_CIs$CI_upper = GAM_CIs$diff + 1.96 * GAM_CIs$se_diff
+GAM_CIs$CI_lower = GAM_CIs$diff - 1.96 * GAM_CIs$se_diff
+
+GAM_CIs$p_value = with(GAM_CIs, 2 * pnorm(-abs(diff / se_diff)))
+GAM_CIs$signif = GAM_CIs$p_value < .05
+
+
+# Plot predicted curves
+ggplot(GAM_data, aes(x = distance, y = weight, color = Group)) +
+  geom_ribbon(aes(ymin = weight-se, ymax = weight+se, group = Group),
+              fill = 'grey', colour = NA)+
+  geom_line(size = 1.2) +
+  annotate('text', x = 210, y = 0.28, 
+           label = substitute(P[smooth] == pval, 
+                              list(pval = round(dev_test[2,5], 3))),
+           size = 5, hjust = 'left')+
+  
+  scale_color_manual(values = c("blue", "red"))+
+  
+  labs(title = "Predicted GAM curves; Positive", 
+       x = 'Geodesic distance on the spherical cortical surface',
+       y = "Predicted partial correlation") +
+  theme_classic()+
+  theme(
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 10, colour = 'black'),,
+    axis.line = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'top',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0))
+  )
+
+# Plot GAM-predicted group differences
+ggplot(GAM_CIs, aes(x = distance, y = diff)) +
+  geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper),
+              fill = 'grey')+
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  geom_line(color = "darkgreen", size = 1.2) +
+  labs(title = "Group difference in GAM curves; Positive", 
+     x = 'Geodesic distance on the spherical cortical surface',
+     y = paste0("Control - ", exp_group))+
+  theme_classic()+
+  theme(
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 10, colour = 'black'),,
+    axis.line = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'none',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0))
+  )
+
+# Plot derivatives - how is weight changing
+gam_deriv = derivatives(gam_model, term = "s(distance)", partial_match = T)
+draw(deriv)
 ```
 
-Splitting the partial correlations by positive and negative, we see that the overall relationship between weight and distance we observed previously is largely constrained to the positive networks. In the positive network, synesthetes show weaker correlations at a shorter distance, and possibly stronger correlations at long distances compared to controls. However, in the negative network, there is no obvious relationship between distance and weight in controls, while in synesthetes, there is a trend towards decreased correlation magnitude at longer distances.  
+In examining the curves for positive correlations, there appears to be a difference between control and synaesthete correlations specifically at longer distances. The GAM model would suggest that these long-distance positive correlations are significantly different between groups.
+
+```{r weight_distance_split_neg}
+# Visualise weight-distance relationships for negative split networks #
+
+# Positive networks
+dists_neg = dists[dists$Sign == 'Negative',]
+
+# Plot all correlations
+ggplot(data = dists_neg, aes(x = distance, y = weight, colour = Group))+
+  geom_smooth(lwd = 1.1)+
+  geom_point(alpha = 0.3)+
+  scale_color_manual(values = c('blue', 'red'))+
+  labs(x = 'Geodesic distance on the spherical cortical surface',
+       y = 'Partial correlation',
+       title = 'Weight as a function of cortical distance')+
+  theme_classic()+
+  theme(
+    text = element_text(size = 12, face = 'bold', colour = 'black'),
+    axis.text = element_text(size = 10, colour = 'black'),,
+    axis.line = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks = element_line(linewidth = 0.8, colour = 'black'),
+    axis.ticks.length = unit(1, 'mm'),
+    legend.position = 'top',
+    plot.title = element_text(vjust = 2, margin = margin(0, 0, 0, 0))
+  )
+
+# Fit GAM
+gam_model_neg = gam(weight ~ s(distance, by = Group, k = 5) + Group, 
+                    data = dists_neg, family = 'gaussian')
+print(summary(gam_model_neg))  # for signifiance of model terms
+```
+
+For negative correlations, there appears to be no clear relationship between distance and weight for controls or synaesthetes. Indeed, the GAM model indicates that the smoothing terms are not significant, suggesting that the relationship is not well described by a smooth curve. However, the parametric coefficient for group is still significant, suggesting that synaesthetes still have substantially stronger negative partial correlations compared to controls. 
 
 
 ## Graph complexity
