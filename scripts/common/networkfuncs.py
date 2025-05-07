@@ -251,7 +251,7 @@ def plot_network_distances(graph, label, colour):
     plt.grid(alpha=0.3)  # make the grid slightly transparent
 
 
-def draw_graph_anatomical(graph, positions, colours, absolute_edges, output_file):
+def draw_graph_anatomical(graph, positions, colours, absolute_edges, output_file, scale=(2, 20, 3)):
     """
     Draws a graph with an anatomical layout, with scaled edge widths and group-coloured vertices.
 
@@ -261,6 +261,7 @@ def draw_graph_anatomical(graph, positions, colours, absolute_edges, output_file
     - colours (dict): numerical keys corresponding to hex code colours.
     - absolute_edges (bool): if True, scale edge widths but keeping absolute differences; otherwise use min-max scaling.
     - output_file (str): file to save the figure.
+    - scale (tuple): values for minimum, maximum and power for scaling edge widths.
 
     Returns:
     - (plt): A matplotlib figure.
@@ -296,10 +297,11 @@ def draw_graph_anatomical(graph, positions, colours, absolute_edges, output_file
     # Set edge widths
     if absolute_edges:  # if using absolute partial correlations
         edge_width = graph.new_edge_property("double")  # create new edge property for width
-        edge_width.a = (graph.ep.weight.a**3)*20  # desired non-linear scaling
+        edge_width.a = (graph.ep.weight.a ** scale[0]) * scale[1] # desired non-linear scaling
+        #edge_width = prop_to_size(prop=graph.ep.weight, mi=scale[0], ma=scale[1], power=scale[2], log=False)  # use desired min-max scaling
 
     else:  # if using signed partial correlations
-        edge_width = prop_to_size(graph, graph.ep.weight, mi=0.1, ma=4, power=3, log=False)  # use desired min-max scaling
+        edge_width = prop_to_size(prop=graph.ep.weight, mi=scale[0], ma=scale[1], power=scale[2], log=False)  # use desired min-max scaling
 
     # Draw the graph
     graph_draw(
@@ -310,9 +312,10 @@ def draw_graph_anatomical(graph, positions, colours, absolute_edges, output_file
         edge_pen_width=edge_width,  # set edge widths
         eorder=graph.ep.weight,  # set edge order (largest on top)
         vertex_color='black',  # set vertex stroke colour
-        vertex_size=10,  # set vertex size
+        vertex_size=11,  # set vertex size
         output_size=(800, 800),  # set plot size
-        output=output_file  # set where to save the plot
+        output=output_file,  # set where to save the plot,
+        bg_color='white'
     )
 
 def euclidean_distance(x1, y1, x2, y2):
